@@ -9,11 +9,15 @@ script:
     cargo build
     cargo test
     cargo test --release
+    if [[ "$TRAVIS_CPU_ARCH" == amd64 ]]
+    then
+      rustup target add i686-unknown-linux-gnu
+      cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
+      cargo test --release --target i686-unknown-linux-gnu --target-dir=target/i686
+    fi
     if [[ "$TRAVIS_RUST_VERSION" == nightly ]] && [[ "$TRAVIS_CPU_ARCH" == amd64 ]]
     then
       rustup component add rust-src
-      cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
-      cargo test --release --target i686-unknown-linux-gnu --target-dir=target/i686
       RUSTFLAGS=-Zsanitizer=address cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/address
       RUSTFLAGS=-Zsanitizer=thread cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/thread
       RUSTFLAGS=-Zsanitizer=memory cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/memory
