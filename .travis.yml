@@ -9,7 +9,7 @@ script:
     cargo build
     cargo test
     cargo test --release
-    if [[ "$TRAVIS_RUST_VERSION" == nightly ]] && [[ TRAVIS_CPU_ARCH == "amd64" ]]
+    if [[ "$TRAVIS_RUST_VERSION" == nightly ]] && [[ "$TRAVIS_CPU_ARCH" == amd64 ]]
     then
       rustup component add rust-src
       cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
