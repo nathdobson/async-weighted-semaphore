@@ -23,16 +23,14 @@ pub enum AcquireState {
 }
 
 impl Packable for ReleaseState {
-    type Raw = usize;
-
-    unsafe fn encode(val: Self) -> Self::Raw {
+    unsafe fn encode(val: Self) -> usize {
         ((val.releasable << 2) | (match val.mode {
             Unlocked => 0,
             Locked => 1,
             LockedDirty => 2,
         })) as usize
     }
-    unsafe fn decode(val: Self::Raw) -> Self {
+    unsafe fn decode(val: usize) -> Self {
         ReleaseState {
             releasable: (val >> 2) as usize,
             mode: match val & 3 {
@@ -46,15 +44,14 @@ impl Packable for ReleaseState {
 }
 
 impl Packable for AcquireState {
-    type Raw = usize;
 
-    unsafe fn encode(val: Self) -> Self::Raw {
+    unsafe fn encode(val: Self) -> usize {
         match val {
             Queued(back) => back as usize,
             Available(available) => ((available << 1) | 1) as usize,
         }
     }
-    unsafe fn decode(val: Self::Raw) -> Self {
+    unsafe fn decode(val: usize) -> Self {
         if val & 1 == 1 {
             Available((val >> 1) as usize)
         } else {

@@ -3,6 +3,7 @@ use std::task::{Waker};
 use std::sync::atomic::Ordering::{Acquire};
 use crate::waker::Flag::{Sleeping, Storing, Finished, Cancelled, Loading};
 use crate::atomic::{Atomic, Packable};
+use std::mem;
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 enum Flag {
@@ -18,7 +19,15 @@ pub struct AtomicWaker {
     waker: UnsafeCell<Option<Waker>>,
 }
 
-impl Packable for Flag { type Raw = u8; }
+impl Packable for Flag {
+    unsafe fn encode(val: Self) -> usize {
+        mem::transmute::<_, u8>(val) as usize
+    }
+
+    unsafe fn decode(val: usize) -> Self {
+        mem::transmute(val as u8)
+    }
+}
 
 pub enum PollResult {
     Pending,

@@ -1,34 +1,19 @@
-use std::{mem};
-use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{Ordering, AtomicUsize};
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
+use std::marker::PhantomData;
 
-use ::atomic::Atomic as RawAtomic;
-
-pub struct Atomic<T: Packable>(RawAtomic<T::Raw>);
+pub struct Atomic<T: Packable>(AtomicUsize, PhantomData<T>);
 
 pub trait Packable: Sized + Copy {
-    type Raw: Copy;
-    unsafe fn encode(val: Self) -> Self::Raw {
-        force_transmute(val)
-    }
-    unsafe fn decode(val: Self::Raw) -> Self {
-        force_transmute(val)
-    }
-}
-
-pub unsafe fn force_transmute<T, U>(value: T) -> U {
-    assert_eq!(size_of::<T>(), size_of::<U>());
-    let result = mem::transmute_copy(&value);
-    mem::forget(value);
-    result
+    unsafe fn encode(val: Self) -> usize;
+    unsafe fn decode(val: usize) -> Self;
 }
 
 #[must_use]
 pub struct Transact<'a, T: Packable> {
     atom: &'a Atomic<T>,
-    current: T::Raw,
+    current: usize,
     new: T,
 }
 
@@ -47,7 +32,7 @@ impl<'a, T: Packable> DerefMut for Transact<'a, T> {
 }
 
 impl<'a, T: Packable> Transact<'a, T> {
-    pub fn commit(self) -> Result<T, T::Raw> {
+    pub fn commit(self) -> Result<T, usize> {
         unsafe {
             match self.atom.0.compare_exchange_weak(
                 self.current, T::encode(self.new),
@@ -61,41 +46,12 @@ impl<'a, T: Packable> Transact<'a, T> {
 
 impl<T: Packable> Atomic<T> {
     pub fn new(val: T) -> Self {
-        Atomic(RawAtomic::new(unsafe { T::encode(val) }))
+        Atomic(AtomicUsize::new(unsafe { T::encode(val) }), PhantomData)
     }
     pub fn load(&self, order: Ordering) -> T {
         unsafe { T::decode(self.0.load(order)) }
     }
-    // pub fn compare_and_swap(
-    //     &self,
-    //     current: T,
-    //     new: T,
-    //     order: Ordering)
-    //     -> T {
-    //     unsafe {
-    //         match self.0.compare_exchange(
-    //             T::encode(current),
-    //             T::encode(new),
-    //             order,
-    //             match order {
-    //                 Relaxed | Release => Relaxed,
-    //                 Acquire | AcqRel => Acquire,
-    //                 SeqCst => SeqCst,
-    //                 _ => unimplemented!(),
-    //             }) {
-    //             Ok(old) => T::decode(old),
-    //             Err(old) => T::decode(old),
-    //         }
-    //     }
-    // }
-
-    // pub fn swap(&self, new: T, order: Ordering) -> T {
-    //     unsafe {
-    //         T::decode(self.0.swap(T::encode(new), order))
-    //     }
-    // }
-
-    pub fn transact<'a, R>(&'a self, mut update: impl FnMut(Transact<'a, T>) -> Result<R, T::Raw>) -> R {
+    pub fn transact<'a, R>(&'a self, mut update: impl FnMut(Transact<'a, T>) -> Result<R, usize>) -> R {
         unsafe {
             let mut value = self.0.load(Acquire);
             loop {
