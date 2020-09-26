@@ -1,0 +1,17 @@
+language: rust
+rust:
+- stable
+- beta
+- nightly
+matrix:
+script:
+  - cargo build
+  - cargo test
+  - cargo test --release
+  - RUSTFLAGS=-Zsanitizer=address cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/address
+  - RUSTFLAGS=-Zsanitizer=thread cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/thread
+  - RUSTFLAGS=-Zsanitizer=memory cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/memory
+  - RUSTFLAGS=-Zsanitizer=leak cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/leak
+allow_failures:
+- rust: nightly
+cache: cargo
