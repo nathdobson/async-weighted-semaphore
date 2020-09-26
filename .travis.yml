@@ -7,39 +7,55 @@ rust:
 os: linux
 jobs:
   include:
-    - arch:
-        - amd64
-        - ppc64le
-        - s390x
-        - arm64
-      env:
-        - RELEASE=
-        - RELEASE=--release
-      script:
-        - cargo test $RELEASE
-    - arch:
-        - amd64
-      env:
-        - RELEASE=
-        - RELEASE=--release
-      addons:
-        apt:
-          packages:
-            - gcc-multilib
+    - arch: amd64
+      script: cargo test
+    - arch: amd64
+      script: cargo test --release
+    - arch: ppc64le
+      script: cargo test
+    - arch: ppc64le
+      script: cargo test --release
+    - arch: s390x
+      script: cargo test
+    - arch: s390x
+      script: cargo test --release
+    - arch: arm64
+      script: cargo test
+    - arch: arm64
+      script: cargo test --release
+    - arch: amd64
       script:
         - |
           set -e
           rustup target add i686-unknown-linux-gnu
-          cargo test --release --target i686-unknown-linux-gnu --target-dir=target/i686
-    - arch:
-        - amd64
-      env:
-        - SANITIZER=address
-        - SANITIZER=memory
-        - SANITIZER=thread
-        - SANITIZER=leak
+          cargo test $RELEASE --target i686-unknown-linux-gnu --target-dir=target/i686
+    - arch: amd64
+      script:
+        - |
+          set -e
+          rustup target add i686-unknown-linux-gnu
+          cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
+    - arch: amd64
       script:
         - |
           set -e
           rustup component add rust-src
-          RUSTFLAGS=-Zsanitizer=$SANITIZER cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/$SANITIZER
+          RUSTFLAGS=-Zsanitizer=address cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/address
+    - arch: amd64
+      script:
+        - |
+          set -e
+          rustup component add rust-src
+          RUSTFLAGS=-Zsanitizer=memory cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/memory
+    - arch: amd64
+      script:
+        - |
+          set -e
+          rustup component add rust-src
+          RUSTFLAGS=-Zsanitizer=thread cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/thread
+    - arch: amd64
+      script:
+        - |
+          set -e
+          rustup component add rust-src
+          RUSTFLAGS=-Zsanitizer=leak cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/leak
