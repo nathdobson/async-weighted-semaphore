@@ -56,7 +56,7 @@ jobs:
         - |
           set -e
           rustup component add rust-src
-          RUSTFLAGS=-Zsanitizer="$SANITIZER" cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$SANITIZER"
+          RUSTFLAGS=-Zsanitizer="$SANITIZER" cargo test --lib --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$SANITIZER"
     - arch: amd64
       rust: nightly
       env: SANITIZER=memory

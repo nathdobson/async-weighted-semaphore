@@ -27,7 +27,8 @@ pub use crate::guard::SemaphoreGuard;
 use crate::state::{ReleaseMode, AcquireState, ReleaseState};
 pub use crate::guard::SemaphoreGuardArc;
 
-/// The call to acquire failed because the underlying semaphore shut down.
+/// An error returned from the `acquire` method on `Semaphore`.
+/// This error indicates that the `Semaphore` shut down.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone, Copy)]
 pub struct AcquireError;
 
@@ -39,12 +40,13 @@ impl Display for AcquireError {
     }
 }
 
+/// An error returned from the `try_acquire` method on `Semaphore`.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq)]
 pub enum TryAcquireError {
-    /// The call to acquire would have blocked because there is insufficient capacity or
-    /// another call to acquire is blocked.
+    /// There is insufficient capacity or a call to `acquire` is blocked, so it is not possible
+    /// to acquire without blocking.
     WouldBlock,
-    /// The call to acquire failed because the underlying semaphore shut down.
+    /// The call to `try_acquire` failed because the `Semaphore` shut down.
     Shutdown,
 }
 
@@ -107,12 +109,14 @@ enum AcquireStep {
     Poison,
 }
 
+/// A `Future` that `acquire`s a specified number of permits from a `Semaphore` and returns a `SemaphoreGuard`.
 pub struct AcquireFuture<'a> {
     semaphore: &'a Semaphore,
     amount: usize,
     step: AcquireStep,
 }
 
+/// A `Future` that `acquire`s a specified number of permits from an `Arc<Semaphore>` and returns a `SemaphoreGuardArc`.
 pub struct AcquireFutureArc<'a> {
     arc: &'a Arc<Semaphore>,
     inner: AcquireFuture<'a>,
