@@ -1,57 +1,36 @@
 language: rust
 cache: cargo
+os: linux
+
 rust:
   - stable
   - beta
   - nightly
-os: linux
+
+env:
+  - RELEASE=
+  - RELEASE=--release
+
 arch:
   - amd64
+  - arm64
   - ppc64le
   - s390x
-  - arm64
-env:
-  - CONFIG=default
-  - CONFIG=release
-  - CONFIG=default_i686
-  - CONFIG=release_i686
-  - CONFIG=address
-  - CONFIG=memory
-  - CONFIG=thread
-  - CONFIG=leak
-script:
-  - |
-    set -e
-    if [[ "$CONFIG" == default ]]
-    then
-      cargo test
-    elif [[ "$CONFIG" == release ]]
-    then
-      cargo test --release
-    elif [[ "$CONFIG" == default_i686 ]]
-    then
-      rustup target add i686-unknown-linux-gnu
-      cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
-    elif [[ "$CONFIG" == release_i686 ]]
-    then
-      rustup target add i686-unknown-linux-gnu
-      cargo test --release --target i686-unknown-linux-gnu --target-dir=target/i686
-    else
-      set -e
-      rustup component add rust-src
-      RUSTFLAGS=-Zsanitizer="$CONFIG" cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$CONFIG"
-    fi
 
 jobs:
-  exclude:
-    - arch:
-        - ppc64le
-        - s390x
-        - arm64
-      env:
-        - CONFIG=default_i686
-        - CONFIG=release_i686
-        - CONFIG=address
-        - CONFIG=memory
-        - CONFIG=thread
-        - CONFIG=leak
+  include:
+    -
+      script: cargo test $RELEASE
+    - arch: amd64
+      script:
+        - |
+          rustup target add i686-unknown-linux-gnu
+          cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
+    - arch: amd64
+      rust: nightly
+      env: RELEASE=--release
+      script:
+        - \
+          set -e
+          rustup component add rust-src
+          RUSTFLAGS=-Zsanitizer="address" cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"address"
