@@ -1,44 +1,53 @@
-use crate::Waiter;
+use crate::{Waiter, Semaphore};
 use crate::atomic::Packable;
-use crate::state::ReleaseMode::{Unlocked, Locked, LockedDirty};
 use crate::state::AcquireState::{Available, Queued};
+use crate::state::ReleaseState::{LockedDirty, Locked, Unlocked};
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub enum ReleaseMode {
-    Unlocked,
+pub enum ReleaseState {
+    // Indicates there are no releases in progress. Contains a count of permits that are available
+    // to the next pending acquire.
+    Unlocked(usize),
+    // Indicates there is at least one release in progress. One release owns the lock and tracks
+    // the number of available permits.
     Locked,
-    LockedDirty,
-}
-
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub struct ReleaseState {
-    pub releasable: usize,
-    pub mode: ReleaseMode,
+    // Indicates there is at least one release in progress, and a release completed without holding
+    // the lock, defering a number of permits for the release lock owner.
+    LockedDirty(usize),
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) enum AcquireState {
+    // Indicates that there may be pending acquires and contains a pointer to the back of the queue.
     Queued(*const Waiter),
+    // Indicates that there are not pending acquires and contains the available permits.
     Available(usize),
 }
 
 impl Packable for ReleaseState {
     unsafe fn encode(val: Self) -> usize {
-        ((val.releasable << 2) | (match val.mode {
-            Unlocked => 0,
-            Locked => 1,
-            LockedDirty => 2,
-        })) as usize
+        match val {
+            Unlocked(releasable) => {
+                assert!(releasable <= Semaphore::MAX_AVAILABLE);
+                releasable
+            }
+            Locked => !0,
+            LockedDirty(releasable) => {
+                assert!(releasable <= Semaphore::MAX_AVAILABLE);
+                releasable | (1 << 63)
+            }
+        }
     }
     unsafe fn decode(val: usize) -> Self {
-        ReleaseState {
-            releasable: (val >> 2) as usize,
-            mode: match val & 3 {
-                0 => Unlocked,
-                1 => Locked,
-                2 => LockedDirty,
-                _ => unreachable!()
-            },
+        if val == !0 {
+            Locked
+        } else {
+            let releasable = val & !(1 << 63);
+            if val & (1 << 63) != 0 {
+                LockedDirty(releasable)
+            } else {
+                Unlocked(releasable)
+            }
         }
     }
 }

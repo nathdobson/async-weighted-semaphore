@@ -92,7 +92,7 @@ fn test_multicore_impl() {
             async move {
                 //let indent = " ".repeat(thread * 10);
                 let mut owned = 0;
-                for _i in 0..100 {
+                for _i in 0..500 {
                     //println!("{:?}", semaphore.semaphore);
                     if owned == 0 {
                         owned = thread_rng().gen_range(0, capacity + 1);
