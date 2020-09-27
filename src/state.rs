@@ -17,7 +17,7 @@ pub struct ReleaseState {
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub enum AcquireState {
+pub(crate) enum AcquireState {
     Queued(*const Waiter),
     Available(usize),
 }
@@ -44,7 +44,6 @@ impl Packable for ReleaseState {
 }
 
 impl Packable for AcquireState {
-
     unsafe fn encode(val: Self) -> usize {
         match val {
             Queued(back) => back as usize,

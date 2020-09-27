@@ -44,6 +44,10 @@ jobs:
     - arch: amd64
       rust: nightly
       env: TARGET=i686
+      addons:
+        apt:
+          packages:
+            - gcc-multilib
       script: *i686_script
     - arch: amd64
       rust: nightly

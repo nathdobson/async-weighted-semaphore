@@ -1,3 +1,5 @@
+//! An async weighted semaphore.
+
 mod atomic;
 mod waker;
 mod guard;
@@ -22,10 +24,10 @@ use crate::state::AcquireState::{Available, Queued};
 use crate::atomic::{Atomic};
 use std::sync::Arc;
 pub use crate::guard::SemaphoreGuard;
-pub use crate::guard::SemaphoreGuardWith;
 use crate::state::{ReleaseMode, AcquireState, ReleaseState};
+pub use crate::guard::SemaphoreGuardArc;
 
-
+/// The call to acquire failed because the underlying semaphore shut down.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone, Copy)]
 pub struct AcquireError;
 
@@ -39,7 +41,10 @@ impl Display for AcquireError {
 
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq)]
 pub enum TryAcquireError {
+    /// The call to acquire would have blocked because there is insufficient capacity or
+    /// another call to acquire is blocked.
     WouldBlock,
+    /// The call to acquire failed because the underlying semaphore shut down.
     Shutdown,
 }
 
@@ -51,20 +56,52 @@ impl Display for TryAcquireError {
     }
 }
 
+/// An async weighted semaphore.
+/// A `Semaphore` is a synchronization primitive for limiting concurrent usage of a resource.
+///
+/// A `Semaphore` starts with an initial number of permits available. When a client `acquire`s a number
+/// of permits, the permits become unavailable. If a client attempts to `acquire` more permits
+/// than are available, the call will block. With the permits `acquire`d, the client may safely
+/// use that amount of the shared resource. When the client is done with the resource, it should
+/// `release` the the permits to make them available.
+///
+/// # Priority Policy
+/// `acquire` provides FIFO semantics: calls to `acquire` finish in the same order that
+/// they start. If there is a pending call to `acquire`, a new call to `acquire` will always block,
+/// even if there are enough permits available for the new call. This policy reduces starvation and
+/// tail latency at the cost of utilization.
+/// ```
+/// use async_weighted_semaphore::Semaphore;
+/// use futures::executor::LocalPool;
+/// use futures::task::{LocalSpawnExt, SpawnExt};
+/// use std::rc::Rc;
+///
+/// let sem = Rc::new(Semaphore::new(1));
+/// let mut pool = LocalPool::new();
+/// let spawn = pool.spawner();
+/// // Begin a call to acquire(2).
+/// spawn.spawn_local({let sem = sem.clone(); async move{ sem.acquire(2).await.forget(); }});
+/// // Ensure the call to acquire(2) has started.
+/// pool.run_until_stalled();
+/// // There is 1 permit available, but it cannot be acquired.
+/// assert!(sem.try_acquire(1).is_err());
+/// ```
+///
+/// # Performance
+/// This implementation is wait-free except for the use of dynamic allocation.
 pub struct Semaphore {
     acquire: Atomic<AcquireState>,
     release: Atomic<ReleaseState>,
     front: UnsafeCell<*const Waiter>,
 }
 
-#[repr(align(64))]
-pub struct Waiter {
+struct Waiter {
     waker: AtomicWaker,
     next: UnsafeCell<*const Waiter>,
     remaining: UnsafeCell<usize>,
 }
 
-pub enum AcquireStep {
+enum AcquireStep {
     Enter,
     Loop(*const Waiter),
     Poison,
@@ -76,7 +113,7 @@ pub struct AcquireFuture<'a> {
     step: AcquireStep,
 }
 
-pub struct AcquireArcFuture<'a> {
+pub struct AcquireFutureArc<'a> {
     arc: &'a Arc<Semaphore>,
     inner: AcquireFuture<'a>,
 }
@@ -208,15 +245,15 @@ impl<'a> Future for AcquireFuture<'a> {
     }
 }
 
-impl<'a> Future for AcquireArcFuture<'a> {
-    type Output = SemaphoreGuardWith<Arc<Semaphore>>;
+impl<'a> Future for AcquireFutureArc<'a> {
+    type Output = SemaphoreGuardArc;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
             match Pin::new_unchecked(&mut self.inner).poll(cx) {
                 Poll::Ready(guard) => {
                     let result =
-                        SemaphoreGuardWith::new(self.arc.clone(), guard.forget());
+                        SemaphoreGuardArc::new(self.arc.clone(), guard.forget());
                     Poll::Ready(result)
                 }
                 Poll::Pending => Poll::Pending,
@@ -355,15 +392,7 @@ impl Semaphore {
         }
     }
 
-
-    pub fn acquire(&self, amount: usize) -> AcquireFuture {
-        AcquireFuture {
-            semaphore: self,
-            amount,
-            step: AcquireStep::Enter,
-        }
-    }
-
+    /// Create a new semaphore with an initial number of permits.
     pub fn new(initial: usize) -> Self {
         Semaphore {
             acquire: Atomic::new(Available(initial)),
@@ -372,7 +401,52 @@ impl Semaphore {
         }
     }
 
-    fn release(&self, amount: usize) {
+    /// Wait until there are no older pending calls to `acquire` and at least `amount` permits available.
+    /// Then consume the requested permits and return a `SemaphoreGuard`.
+    pub fn acquire(&self, amount: usize) -> AcquireFuture {
+        AcquireFuture {
+            semaphore: self,
+            amount,
+            step: AcquireStep::Enter,
+        }
+    }
+
+    /// Like `acquire`, but fails if the call would block.
+    pub fn try_acquire(&self, amount: usize) -> Result<SemaphoreGuard, TryAcquireError> {
+        self.acquire.transact(|mut acquire| {
+            Ok(match *acquire {
+                Queued(_) => Err(TryAcquireError::WouldBlock),
+                Available(available) => {
+                    if amount <= available {
+                        *acquire = Available(available - amount);
+                        acquire.commit()?;
+                        Ok(SemaphoreGuard::new(self, amount))
+                    } else {
+                        Err(TryAcquireError::WouldBlock)
+                    }
+                }
+            })
+        })
+    }
+
+    /// Like `acquire`, but takes an `Arc<Semaphore>` and returns a guard that is `'static`, `Send` and `Sync`.
+    pub fn acquire_arc<'a>(self: &'a Arc<Self>, amount: usize) -> AcquireFutureArc<'a> {
+        AcquireFutureArc { arc: self, inner: self.acquire(amount) }
+    }
+
+
+    /// Like `try_acquire`, but fails if the call would block, takes an `Arc<Semaphore>`, and returns
+    /// a guard that is `'static`, `Send` and `Sync`.
+    pub fn try_acquire_arc(self: &Arc<Self>, amount: usize) -> Result<SemaphoreGuardArc, TryAcquireError> {
+        let guard = self.try_acquire(amount)?;
+        let result = SemaphoreGuardArc::new(self.clone(), amount);
+        guard.forget();
+        Ok(result)
+    }
+
+    /// Return `amount` permits to the semaphore. This will eventually wake any calls to `acquire`
+    /// that can succeed with the additional permits.
+    pub fn release(&self, amount: usize) {
         unsafe {
             self.release.transact(|mut release| {
                 release.releasable += amount;
@@ -391,35 +465,6 @@ impl Semaphore {
                 }
             });
         }
-    }
-
-    pub fn acquire_arc<'a>(self: &'a Arc<Self>, amount: usize) -> AcquireArcFuture<'a> {
-        AcquireArcFuture { arc: self, inner: self.acquire(amount) }
-    }
-
-
-    pub fn try_acquire(&self, amount: usize) -> Result<SemaphoreGuard, TryAcquireError> {
-        self.acquire.transact(|mut acquire| {
-            Ok(match *acquire {
-                Queued(_) => Err(TryAcquireError::WouldBlock),
-                Available(available) => {
-                    if amount <= available {
-                        *acquire = Available(available - amount);
-                        acquire.commit()?;
-                        Ok(SemaphoreGuard::new(self, amount))
-                    } else {
-                        Err(TryAcquireError::WouldBlock)
-                    }
-                }
-            })
-        })
-    }
-
-    pub fn try_acquire_arc(self: &Arc<Self>, amount: usize) -> Result<SemaphoreGuardWith<Arc<Self>>, TryAcquireError> {
-        let guard = self.try_acquire(amount)?;
-        let result = SemaphoreGuardWith::new(self.clone(), amount);
-        guard.forget();
-        Ok(result)
     }
 }
 
