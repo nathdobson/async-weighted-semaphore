@@ -17,20 +17,51 @@ arch:
   - ppc64le
   - s390x
 
+script: cargo test $RELEASE
+
 jobs:
   include:
-    -
-      script: cargo test $RELEASE
     - arch: amd64
-      script:
+      rust: stable
+      env: TARGET=i686
+      addons:
+        apt:
+          packages:
+            - gcc-multilib
+      script: &i686_script
         - |
+          set -e
           rustup target add i686-unknown-linux-gnu
           cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
     - arch: amd64
+      rust: beta
+      env: TARGET=i686
+      addons:
+        apt:
+          packages:
+            - gcc-multilib
+      script: *i686_script
+    - arch: amd64
       rust: nightly
-      env: RELEASE=--release
-      script:
-        - \
+      env: TARGET=i686
+      script: *i686_script
+    - arch: amd64
+      rust: nightly
+      env: SANITIZER=address
+      script: &sanitizer_script
+        - |
           set -e
           rustup component add rust-src
-          RUSTFLAGS=-Zsanitizer="address" cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"address"
+          RUSTFLAGS=-Zsanitizer="$SANITIZER" cargo test --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$SANITIZER"
+    - arch: amd64
+      rust: nightly
+      env: SANITIZER=memory
+      script: *sanitizer_script
+    - arch: amd64
+      rust: nightly
+      env: SANITIZER=thread
+      script: *sanitizer_script
+    - arch: amd64
+      rust: nightly
+      env: SANITIZER=leak
+      script: *sanitizer_script
