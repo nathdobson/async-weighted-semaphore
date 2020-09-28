@@ -22,9 +22,9 @@ fn test_simple() {
         let semaphore = semaphore.clone();
         async move {
             println!("F");
-            semaphore.acquire(10).await.forget();
+            semaphore.acquire(10).await.unwrap().forget();
             println!("G");
-            semaphore.acquire(10).await.forget();
+            semaphore.acquire(10).await.unwrap().forget();
             println!("H");
         }
     }).unwrap();
@@ -53,7 +53,7 @@ impl CheckedSemaphore {
     }
     async fn acquire(&self, amount: usize) -> SemaphoreGuard<'_> {
         //println!("+ {}", amount);
-        let guard = self.semaphore.acquire(amount).await;
+        let guard = self.semaphore.acquire(amount).await.unwrap();
         let mut lock = self.counter.lock().unwrap();
         //println!("{} + {} = {} ", *lock, amount, *lock + amount);
         *lock += amount;
