@@ -1,10 +1,13 @@
-use crate::{Waiter, Semaphore};
+use crate::{Waiter, Semaphore, WaiterData};
 use crate::atomic::Packable;
 use crate::state::AcquireState::{Available, Queued};
 use crate::state::ReleaseState::{LockedDirty, Locked, Unlocked};
 use std::ops::{AddAssign, Add, Sub, SubAssign};
+use std::fmt::{Debug, Formatter};
+use std::fmt;
+use std::ptr::null;
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Permits(pub(self) usize);
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
@@ -20,10 +23,10 @@ pub enum ReleaseState {
     LockedDirty(Permits),
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum AcquireState {
     // Indicates that there may be pending acquires and contains a pointer to the back of the queue.
-    Queued(*const Waiter),
+    Queued(*const Waiter<WaiterData>),
     // Indicates that there are not pending acquires and contains the available permits.
     Available(Permits),
 }
@@ -72,7 +75,7 @@ impl Packable for AcquireState {
                 Available(Permits::new((val >> 1) as usize))
             }
         } else {
-            Queued(val as *const Waiter)
+            Queued(val as *const Waiter<WaiterData>)
         }
     }
 }
@@ -92,6 +95,40 @@ impl Permits {
         }
     }
 }
+
+impl Debug for Permits {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.0 <= Semaphore::MAX_AVAILABLE {
+            write!(f, "{:?}", self.0)
+        } else {
+            write!(f, "poison")
+        }
+    }
+}
+
+impl Debug for AcquireState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Queued(back) => f.debug_tuple("Queued").field(&DebugPtr(*back)).finish(),
+            Available(permits) => f.debug_tuple("Available").field(&permits).finish(),
+        }
+    }
+}
+
+pub struct DebugPtr(pub(crate) *const Waiter<WaiterData>);
+
+impl Debug for DebugPtr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        unsafe {
+            write!(f, "{:?}", self.0)?;
+            if self.0 != null() {
+                write!(f, " {:?} {:?} {:?}", *(*self.0).amount.get(), *(*self.0).poisoned.get(), DebugPtr(*(*self.0).next.get()))?;
+            }
+            Ok(())
+        }
+    }
+}
+
 
 impl Add for Permits {
     type Output = Self;
