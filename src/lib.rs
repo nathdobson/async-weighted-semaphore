@@ -207,6 +207,10 @@ impl<'a> AcquireFuture<'a> {
                     let available = match available.into_usize() {
                         None => {
                             self.step = AcquireStep::Done;
+                            if waiter != null() {
+                                (*waiter).free();
+                                waiter = null();
+                            }
                             return Ok(Poll::Ready(Err(AcquireError)));
                         }
                         Some(available) => available,
