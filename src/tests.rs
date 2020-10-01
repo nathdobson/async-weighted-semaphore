@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::rc::Rc;
 use std::time::Duration;
 use async_std::future::{timeout, TimeoutError};
-use crate::{Semaphore, SemaphoreGuard, SemaphoreGuardArc, AcquireError, AcquireFutureArc, AcquireFuture};
+use crate::{Semaphore, SemaphoreGuard, SemaphoreGuardArc, AcquireError, AcquireFutureArc, AcquireFuture, TryAcquireError};
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use async_std::task::spawn;
 use std::sync::atomic::{AtomicUsize, AtomicIsize, AtomicU32, AtomicBool, AtomicU64};
@@ -323,7 +323,7 @@ fn test_multicore_impl() {
                     }
 
                     barrier.wait();
-                    print!("{:?} ",futures.len());
+                    print!("{:?} ", futures.len());
                     if let Some(front) = futures.values_mut().next() {
                         pending_max.fetch_max(front.inner.amount as isize, Relaxed);
                     }
@@ -338,7 +338,7 @@ fn test_multicore_impl() {
                             panic!("Should have acquired. {:?} of {:?}", pending_amount, resource.load(Relaxed));
                         }
                     }
-                    if barrier.wait().is_leader(){
+                    if barrier.wait().is_leader() {
                         println!();
                     }
                     if was_poisoned {
@@ -385,6 +385,12 @@ fn test_multicore_impl() {
                     let amount = thread_rng().gen_range(0, 20);
                     resource.fetch_add(amount as isize, Relaxed);
                     semaphore.release(amount);
+                }
+                if thread_rng().gen_bool(0.1) {
+                    if let Ok(guard)
+                    = semaphore.try_acquire(thread_rng().gen_range(0, 10)) {
+                        on_guard(Ok(guard));
+                    }
                 }
                 if thread_rng().gen_bool(0.0001) {
                     poisoned.store(true, Relaxed);
