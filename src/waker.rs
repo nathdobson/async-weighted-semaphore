@@ -204,6 +204,8 @@ mod test {
     use std::sync::{Barrier, Arc};
     use async_std::task::spawn;
     use futures::executor::block_on;
+    use std::thread;
+    use futures_test::std_reexport::sync::mpsc::sync_channel;
 
     #[derive(Clone)]
     struct Tester {
@@ -304,44 +306,49 @@ mod test {
 
     fn test_race(finish: bool, cancel: bool) {
         unsafe {
-            for i in 0..10000 {
-                block_on(async {
-                    let (send, recv) = channel();
-                    let b1 = Arc::new(Barrier::new(2));
-                    let b2 = b1.clone();
-                    let send = async move {
-                        let mut tester = Tester { waiter: null() };
-                        assert_eq!(Poll::Pending, poll!(&mut tester));
-                        send.send(tester.clone()).unwrap();
-                        b1.wait();
-                        if cancel {
-                            match (*tester.waiter).cancel() {
-                                CancelResult::Cancelled => None,
-                                CancelResult::Finished(data) => Some(**data.get()),
-                            }
-                        } else {
-                            Some(tester.await)
+            let iters = 10000;
+            let (send, recv) = sync_channel(0);
+            let h1 = thread::spawn(move || block_on(async {
+                let mut results = vec![];
+                for i in 0..iters {
+                    let mut tester = Tester { waiter: null() };
+                    assert_eq!(Poll::Pending, poll!(&mut tester));
+                    send.send(tester.clone()).unwrap();
+                    let result = if cancel {
+                        match (*tester.waiter).cancel() {
+                            CancelResult::Cancelled => None,
+                            CancelResult::Finished(data) => Some(**data.get()),
                         }
+                    } else {
+                        Some(tester.await)
                     };
-                    let recv = async move {
-                        let tester = recv.recv().unwrap();
-                        b2.wait();
-                        if finish {
-                            **(*tester.waiter).get() = i;
-                            (*tester.waiter).finish()
-                        } else {
-                            while !(*tester.waiter).check_cancelled() {}
-                            FinishResult::Cancelled
-                        }
+                    results.push(result);
+                }
+                results
+            }));
+            let h2 = thread::spawn(move || block_on(async {
+                let mut results = vec![];
+                for i in 0..iters {
+                    let tester = recv.recv().unwrap();
+                    let result = if finish {
+                        **(*tester.waiter).get() = i;
+                        (*tester.waiter).finish()
+                    } else {
+                        while !(*tester.waiter).check_cancelled() {}
+                        FinishResult::Cancelled
                     };
-                    let (send, recv) =
-                        join!(spawn(send), spawn(recv));
-                    match (finish, cancel, send, recv) {
-                        (true, _, Some(o), FinishResult::Finished) if i == o => {}
-                        (_, true, None, FinishResult::Cancelled) => {}
-                        _ => panic!("Unexpected outcome {:?}", (finish, cancel, send, recv))
-                    }
-                })
+                    results.push(result);
+                }
+                results
+            }));
+            let r1 = h1.join().unwrap();
+            let r2 = h2.join().unwrap();
+            for (i, (send, recv)) in r1.into_iter().zip(r2.into_iter()).enumerate() {
+                match (finish, cancel, send, recv) {
+                    (true, _, Some(o), FinishResult::Finished) if i == o => {}
+                    (_, true, None, FinishResult::Cancelled) => {}
+                    _ => panic!("Unexpected outcome {:?}", (finish, cancel, send, recv))
+                }
             }
         }
     }
