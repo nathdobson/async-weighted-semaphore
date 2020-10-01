@@ -4,7 +4,6 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::rc::Rc;
 use std::time::Duration;
 use async_std::future::{timeout, TimeoutError};
-use crate::{Semaphore, SemaphoreGuard, SemaphoreGuardArc, AcquireError, AcquireFutureArc, AcquireFuture, TryAcquireError};
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use async_std::task::spawn;
 use std::sync::atomic::{AtomicUsize, AtomicIsize, AtomicU32, AtomicBool, AtomicU64};
@@ -30,40 +29,43 @@ use futures_test::std_reexport::collections::BTreeMap;
 use rand_xorshift::XorShiftRng;
 use std::fmt::Debug;
 use futures_test::futures_core_reexport::core_reexport::fmt::Formatter;
+use crate::{Semaphore, AcquireFuture, AcquireError, SemaphoreGuard};
 
-struct TestFuture<F: Future> {
+struct TestFuture<'a> {
     waker: Waker,
     count: AwokenCount,
     old_count: usize,
-    inner: Pin<Box<F>>,
+    inner: Pin<Box<AcquireFuture<'a>>>,
+    amount: usize,
 }
 
-impl<F: Future + Debug> Debug for TestFuture<F> {
+impl<'a> Debug for TestFuture<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TestFuture")
             .field("waker", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&self.waker) }.0))
             .field("woken", &(self.count.get() != self.old_count))
-            .field("inner_ptr", &(self.inner.as_ref().get_ref() as *const F))
+            .field("inner_ptr", &(self.inner.as_ref().get_ref() as *const AcquireFuture))
+            .field("amount", &self.amount)
             .field("inner", &self.inner)
             .finish()
     }
 }
 
-impl<F: Future> TestFuture<F> {
-    fn new(inner: F) -> Self {
+impl<'a> TestFuture<'a> {
+    fn new(sem: &'a Semaphore, amount: usize) -> Self {
         let (waker, count) = new_count_waker();
-        TestFuture { waker, count, old_count: 0, inner: Box::pin(inner) }
+        TestFuture { waker, count, old_count: 0, inner: Box::pin(sem.acquire(amount)), amount }
     }
     fn count(&self) -> usize {
         self.count.get()
     }
-    fn poll(&mut self) -> Option<F::Output> {
+    fn poll(&mut self) -> Option<Result<SemaphoreGuard<'a>, AcquireError>> {
         match self.inner.as_mut().poll(&mut Context::from_waker(&self.waker)) {
             Poll::Pending => None,
             Poll::Ready(x) => Some(x)
         }
     }
-    fn poll_if_woken(&mut self) -> Option<F::Output> {
+    fn poll_if_woken(&mut self) -> Option<Result<SemaphoreGuard<'a>, AcquireError>> {
         let count = self.count.get();
         if self.old_count != count {
             self.old_count = count;
@@ -72,7 +74,7 @@ impl<F: Future> TestFuture<F> {
             None
         }
     }
-    fn forget(self) where F: Unpin {
+    fn forget(self) {
         // Futures are Unpin, just not publicly.
         mem::forget(*Pin::into_inner(self.inner))
     }
@@ -81,9 +83,9 @@ impl<F: Future> TestFuture<F> {
 #[test]
 fn test_simple() {
     let semaphore = Semaphore::new(1);
-    let mut a1 = TestFuture::new(semaphore.acquire(1));
+    let mut a1 = TestFuture::new(&semaphore, 1);
     let g1 = a1.poll().unwrap().unwrap();
-    let mut a2 = TestFuture::new(semaphore.acquire(1));
+    let mut a2 = TestFuture::new(&semaphore, 1);
     assert_eq!(a1.count(), 0);
     assert_eq!(a2.count(), 0);
     assert!(a2.poll().is_none());
@@ -96,7 +98,7 @@ fn test_simple() {
 #[test]
 fn test_zero_now() {
     let semaphore = Semaphore::new(1);
-    let mut a1 = TestFuture::new(semaphore.acquire(0));
+    let mut a1 = TestFuture::new(&semaphore, 0);
     let g1 = a1.poll().unwrap().unwrap();
     assert_eq!(a1.count(), 0);
     mem::drop(g1);
@@ -107,11 +109,11 @@ fn test_zero_now() {
 fn test_zero_pending() {
     let semaphore = Semaphore::new(0);
     println!("{:?}", semaphore);
-    let mut a1 = TestFuture::new(semaphore.acquire(1));
+    let mut a1 = TestFuture::new(&semaphore, 1);
     println!("{:?}", semaphore);
     assert!(a1.poll().is_none());
     println!("{:?}", semaphore);
-    let mut a2 = TestFuture::new(semaphore.acquire(0));
+    let mut a2 = TestFuture::new(&semaphore, 0);
     let g2 = a2.poll();
     println!("{:?}", g2);
     assert!(a2.poll().is_none());
@@ -125,9 +127,9 @@ fn test_zero_pending() {
 #[test]
 fn test_cancel() {
     let semaphore = Semaphore::new(1);
-    let mut a1 = TestFuture::new(semaphore.acquire(2));
+    let mut a1 = TestFuture::new(&semaphore, 2);
     assert!(a1.poll().is_none());
-    let mut a2 = TestFuture::new(semaphore.acquire(1));
+    let mut a2 = TestFuture::new(&semaphore, 1);
     assert!(a2.poll().is_none());
     assert_eq!(a1.count(), 0);
     assert_eq!(a2.count(), 0);
@@ -139,7 +141,7 @@ fn test_cancel() {
 #[test]
 fn test_leak() {
     let semaphore = Semaphore::new(1);
-    let mut a1 = TestFuture::new(semaphore.acquire(2));
+    let mut a1 = TestFuture::new(&semaphore, 2);
     assert!(a1.poll().is_none());
     a1.forget();
 }
@@ -149,24 +151,24 @@ fn test_poison_panic() {
     let semaphore = Semaphore::new(1);
     assert!(catch_unwind(
         || {
-            let _guard = TestFuture::new(semaphore.acquire(1)).poll().unwrap().unwrap();
+            let _guard = TestFuture::new(&semaphore, 1).poll().unwrap().unwrap();
             panic!("Expected panic");
         }
     ).is_err());
-    TestFuture::new(semaphore.acquire(2)).poll().unwrap().err().unwrap();
+    TestFuture::new(&semaphore, 2).poll().unwrap().err().unwrap();
 }
 
 #[test]
 fn test_poison_new() {
     let semaphore = Semaphore::new(usize::MAX);
-    TestFuture::new(semaphore.acquire(2)).poll().unwrap().err().unwrap();
+    TestFuture::new(&semaphore, 2).poll().unwrap().err().unwrap();
 }
 
 #[test]
 fn test_poison_release_immediate() {
     let semaphore = Semaphore::new(0);
     semaphore.release(usize::MAX);
-    TestFuture::new(semaphore.acquire(2)).poll().unwrap().err().unwrap();
+    TestFuture::new(&semaphore, 2).poll().unwrap().err().unwrap();
 }
 
 #[test]
@@ -174,7 +176,7 @@ fn test_poison_release_add() {
     let semaphore = Semaphore::new(0);
     semaphore.release(Semaphore::MAX_AVAILABLE / 2);
     semaphore.release(Semaphore::MAX_AVAILABLE / 2 + 2);
-    TestFuture::new(semaphore.acquire(2)).poll().unwrap().err().unwrap();
+    TestFuture::new(&semaphore, 2).poll().unwrap().err().unwrap();
 }
 
 
@@ -212,12 +214,12 @@ fn test_sequential() {
     let semaphore = Semaphore::new(0);
     let mut time = 0;
     let mut available = 0usize;
-    let mut futures = BTreeMap::<usize, TestFuture<AcquireFuture>>::new();
+    let mut futures = BTreeMap::<usize, TestFuture>::new();
     let mut rng = XorShiftRng::seed_from_u64(954360855);
-    for i in 0..1000000 {
+    for _ in 0..1000000 {
         if rng.gen_bool(0.1) && futures.len() < 5 {
             let amount = rng.gen_range(0, 10);
-            let mut fut = TestFuture::new(semaphore.acquire(amount));
+            let mut fut = TestFuture::new(&semaphore, amount);
             if let Some(guard) = fut.poll() {
                 guard.unwrap().forget();
                 available = available.checked_sub(amount).unwrap();
@@ -227,10 +229,6 @@ fn test_sequential() {
             time += 1;
         }
         if rng.gen_bool(0.1) {
-            //println!("Semaphore: {:?}", semaphore);
-            for (time, fut) in futures.iter() {
-                //println!("{:?} {:?}", time, fut.inner);
-            }
             let mut blocked = false;
             let mut ready = vec![];
             for (time, fut) in futures.iter_mut() {
@@ -238,7 +236,7 @@ fn test_sequential() {
                     if let Some(guard) = fut.poll_if_woken() {
                         assert!(!blocked);
                         guard.unwrap().forget();
-                        available = available.checked_sub(fut.inner.amount).unwrap();
+                        available = available.checked_sub(fut.amount).unwrap();
                         ready.push(*time);
                     } else {
                         blocked = true;
@@ -281,9 +279,9 @@ fn test_multicore_impl() {
         let barrier = barrier.clone();
         let poisoned = poisoned.clone();
         let pending_max = pending_max.clone();
-        move || unsafe {
+        move ||  {
             let mut time = 0;
-            let mut futures = BTreeMap::<usize, TestFuture<AcquireFuture>>::new();
+            let mut futures = BTreeMap::<usize, TestFuture>::new();
             let on_guard = |guard: Result<SemaphoreGuard, AcquireError>| {
                 match guard {
                     Err(AcquireError) => {}
@@ -293,11 +291,11 @@ fn test_multicore_impl() {
                     }
                 }
             };
-            for iter in 0.. {
+            for _ in 0.. {
                 if thread_rng().gen_bool(0.1) {
                     if futures.len() < 5 {
                         let amount = thread_rng().gen_range(0, 10);
-                        let mut fut = TestFuture::new(semaphore.acquire(amount));
+                        let mut fut = TestFuture::new(&semaphore, amount);
                         match fut.poll() {
                             None => { futures.insert(time, fut); }
                             Some(guard) => on_guard(guard),
@@ -325,7 +323,7 @@ fn test_multicore_impl() {
                     barrier.wait();
                     print!("{:?} ", futures.len());
                     if let Some(front) = futures.values_mut().next() {
-                        pending_max.fetch_max(front.inner.amount as isize, Relaxed);
+                        pending_max.fetch_max(front.amount as isize, Relaxed);
                     }
                     let leader = barrier.wait();
                     let pending_amount = pending_max.load(Relaxed);
@@ -372,7 +370,7 @@ fn test_multicore_impl() {
                 }
                 if thread_rng().gen_bool(0.1) {
                     let mut cancelled = vec![];
-                    for (time, fut) in futures.iter_mut().rev() {
+                    for (time, _) in futures.iter_mut().rev() {
                         if time & 2 == 2 && thread_rng().gen_bool(0.5) {
                             cancelled.push(*time);
                         }

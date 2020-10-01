@@ -310,7 +310,7 @@ mod test {
             let (send, recv) = sync_channel(0);
             let h1 = thread::spawn(move || block_on(async {
                 let mut results = vec![];
-                for i in 0..iters {
+                for _ in 0..iters {
                     let mut tester = Tester { waiter: null() };
                     assert_eq!(Poll::Pending, poll!(&mut tester));
                     send.send(tester.clone()).unwrap();

@@ -526,23 +526,5 @@ impl Semaphore {
         }
     }
 
-    unsafe fn check_stationary_invariants(&self) {
-        let front = *self.front.get();
-        let acquire = self.acquire.load(SeqCst);
-        let release = self.release.load(SeqCst);
-        let releasable = match release {
-            Unlocked(releasable) => releasable,
-            _ => panic!("Locked"),
-        };
-        match acquire {
-            Queued(back) => {
-                assert!(front != null() || back != null());
-            }
-            Available(aquirable) => {
-                assert!(front == null());
-                assert_eq!(releasable.into_usize(), Some(0));
-            }
-        }
-    }
 }
 
