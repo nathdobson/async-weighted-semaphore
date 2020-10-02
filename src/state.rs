@@ -1,11 +1,16 @@
-use crate::{Waiter, Semaphore, WaiterData};
-use crate::atomic::Packable;
+use crate::atomic::{Packable, Atomic};
 use crate::state::AcquireState::{Available, Queued};
 use crate::state::ReleaseState::{LockedDirty, Locked, Unlocked};
 use std::ops::{AddAssign, Add, Sub, SubAssign};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use std::ptr::null;
+use std::cell::UnsafeCell;
+use crate::Semaphore;
+use std::task::Waker;
+use crate::waker::AtomicWaker;
+use std::thread::Thread;
+use std::sync::atomic::Ordering::SeqCst;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Permits(pub(self) usize);
@@ -26,9 +31,26 @@ pub enum ReleaseState {
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum AcquireState {
     // Indicates that there may be pending acquires and contains a pointer to the back of the queue.
-    Queued(*const Waiter<WaiterData>),
+    Queued(*const Waiter),
     // Indicates that there are not pending acquires and contains the available permits.
     Available(Permits),
+}
+
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+pub enum AcquireStep {
+    Entering,
+    Waiting,
+    Done,
+}
+
+pub struct Waiter {
+    pub semaphore: *const Semaphore,
+    pub amount: usize,
+    pub step: UnsafeCell<AcquireStep>,
+    pub waker: AtomicWaker,
+    pub next: UnsafeCell<*const Waiter>,
+    pub prev: UnsafeCell<*const Waiter>,
+    pub next_cancel: UnsafeCell<*const Waiter>,
 }
 
 impl Packable for ReleaseState {
@@ -75,7 +97,7 @@ impl Packable for AcquireState {
                 Available(Permits::new((val >> 1) as usize))
             }
         } else {
-            Queued(val as *const Waiter<WaiterData>)
+            Queued(val as *const Waiter)
         }
     }
 }
@@ -115,17 +137,31 @@ impl Debug for AcquireState {
     }
 }
 
-pub struct DebugPtr(pub(crate) *const Waiter<WaiterData>);
+pub struct DebugPtr(pub(crate) *const Waiter);
 
 impl Debug for DebugPtr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         unsafe {
-            write!(f, "{:?}", self.0)?;
-            if self.0 != null() {
-                write!(f, " {:?} {:?} {:?}", *(*self.0).amount.get(), *(*self.0).poisoned.get(), DebugPtr(*(*self.0).next.get()))?;
+            if self.0 == null() {
+                write!(f, "null")?;
+            } else {
+                write!(f, "{:?} {:?}", self.0, &*self.0)?;
             }
             Ok(())
         }
+    }
+}
+
+impl Debug for Waiter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("W")
+            .field("a", &self.amount)
+            .field("s", unsafe { &*self.step.get() })
+            .field("w", &self.waker)
+            .field("n", unsafe { &*self.next.get() })
+            .field("p", unsafe { &*self.prev.get() })
+            .field("nc", unsafe { &*self.next_cancel.get() })
+            .finish()
     }
 }
 

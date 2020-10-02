@@ -2,6 +2,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{Ordering, AtomicUsize};
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::marker::PhantomData;
+use std::mem;
+use std::thread::Thread;
 
 /// An AtomicUsize containing a bitpacked `T` .
 pub struct Atomic<T: Packable>(AtomicUsize, PhantomData<T>);
@@ -56,6 +58,9 @@ impl<T: Packable> Atomic<T> {
     pub fn load(&self, order: Ordering) -> T {
         unsafe { T::decode(self.0.load(order)) }
     }
+    pub fn swap(&self, val: T, order: Ordering) -> T {
+        unsafe { T::decode(self.0.swap(T::encode(val), order)) }
+    }
     /// Perform a transaction (similar fetch_update).
     /// Calls the callback with the current value as a Transact. Callers may mutate this Transact
     /// and commit it. Errors from commit should be raised with '?'.
@@ -73,5 +78,23 @@ impl<T: Packable> Atomic<T> {
                 }
             }
         }
+    }
+}
+
+impl<T> Packable for *const T {
+    unsafe fn encode(val: Self) -> usize {
+        mem::transmute(val)
+    }
+    unsafe fn decode(val: usize) -> Self {
+        mem::transmute(val)
+    }
+}
+
+impl<T> Packable for *mut T {
+    unsafe fn encode(val: Self) -> usize {
+        mem::transmute(val)
+    }
+    unsafe fn decode(val: usize) -> Self {
+        mem::transmute(val)
     }
 }

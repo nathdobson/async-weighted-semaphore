@@ -8,17 +8,17 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use crate::state::DebugPtr;
+use crate::state::{DebugPtr, Waiter};
 use std::fmt::Display;
 use std::error::Error;
 use std::future::Future;
 use std::task::{Poll, Context};
 use std::pin::Pin;
-use std::{fmt, mem};
+use std::{fmt, mem, thread};
 use std::cell::UnsafeCell;
 use std::ptr::{null};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::Ordering::{Relaxed, SeqCst, AcqRel};
 use crate::state::AcquireState::{Available, Queued};
 use crate::state::ReleaseState::{Locked, Unlocked, LockedDirty};
 use crate::atomic::{Atomic};
@@ -27,8 +27,10 @@ pub use crate::guard::SemaphoreGuard;
 pub use crate::guard::SemaphoreGuardArc;
 use crate::state::{AcquireState, ReleaseState, Permits};
 use std::mem::size_of;
-use crate::waker::{Waiter, CancelResult, FinishResult};
 use std::panic::{UnwindSafe, RefUnwindSafe};
+use std::marker::PhantomData;
+use crate::state::AcquireStep;
+use crate::waker::{AtomicWaker, CancelResult, FinishResult};
 
 /// An error returned from the `acquire` method on `Semaphore`.
 /// This error indicates that the `Semaphore` is poisoned.
@@ -112,29 +114,16 @@ pub struct Semaphore {
     release: Atomic<ReleaseState>,
 
     // The front of the queue (owned by the release lock owner).
-    front: UnsafeCell<*const Waiter<WaiterData>>,
-}
+    front: UnsafeCell<*const Waiter>,
 
-struct WaiterData {
-    // The next waiter in the current stack (may be before or after in the queue).
-    next: UnsafeCell<*const Waiter<WaiterData>>,
-    amount: UnsafeCell<usize>,
-    poisoned: UnsafeCell<bool>,
-}
+    middle: UnsafeCell<*const Waiter>,
 
-#[derive(Debug)]
-enum AcquireStep {
-    Enter,
-    Loop(*const Waiter<WaiterData>),
-    Done,
+    // The next waiter to cancel
+    next_cancel: Atomic<*const Waiter>,
 }
 
 /// A `Future` that `acquire`s a specified number of permits from a `Semaphore` and returns a `SemaphoreGuard`.
-pub struct AcquireFuture<'a> {
-    semaphore: &'a Semaphore,
-    amount: usize,
-    step: AcquireStep,
-}
+pub struct AcquireFuture<'a>(UnsafeCell<Waiter>, PhantomData<&'a Semaphore>);
 
 /// A `Future` that `acquire`s a specified number of permits from an `Arc<Semaphore>` and returns a `SemaphoreGuardArc`.
 pub struct AcquireFutureArc {
@@ -154,33 +143,9 @@ unsafe impl<'a> Sync for AcquireFuture<'a> {}
 
 unsafe impl<'a> Send for AcquireFuture<'a> {}
 
-impl<'a> Unpin for AcquireFuture<'a> {}
-
-
 impl<'a> Debug for AcquireFuture<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AcquireFuture")
-            .field("amount", &self.amount)
-            .field("step", &self.step)
-            .finish()
-    }
-}
-
-impl Drop for Semaphore {
-    fn drop(&mut self) {
-        unsafe {
-            let back = match self.acquire.load(Relaxed) {
-                Queued(back) => back,
-                Available(_) => null(),
-            };
-            for &(mut ptr) in &[*self.front.get(), back] {
-                while ptr != null() {
-                    let next = *(*ptr).next.get();
-                    (*ptr).free();
-                    ptr = next;
-                }
-            }
-        }
+        write!(f, "{:?}", unsafe { &*self.0.get() })
     }
 }
 
@@ -191,6 +156,7 @@ impl Debug for Semaphore {
             w.field("acquire", &self.acquire.load(SeqCst));
             w.field("release", &self.release.load(SeqCst));
             w.field("front", &DebugPtr(*self.front.get()));
+            w.field("middle", &DebugPtr(*self.middle.get()));
             w.finish()?;
             Ok(())
         }
@@ -198,52 +164,55 @@ impl Debug for Semaphore {
 }
 
 impl<'a> AcquireFuture<'a> {
+    unsafe fn waiter(&self) -> &Waiter {
+        &*self.0.get()
+    }
     unsafe fn poll_enter(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
-        let mut waiter: *const Waiter<WaiterData> = null();
-        self.semaphore.acquire.transact(|mut acquire| {
+        (*self.waiter().semaphore).acquire.transact(|mut acquire| {
             let (available, back) = match *acquire {
                 Queued(back) => (0, back),
                 Available(available) => {
                     let available = match available.into_usize() {
                         None => {
-                            self.step = AcquireStep::Done;
-                            if waiter != null() {
-                                (*waiter).free();
-                                waiter = null();
-                            }
+                            *self.waiter().step.get() = AcquireStep::Done;
                             return Ok(Poll::Ready(Err(AcquireError)));
                         }
                         Some(available) => available,
                     };
-                    if self.amount <= available {
-                        *acquire = Available(Permits::new(available - self.amount));
+                    if self.waiter().amount <= available {
+                        *acquire = Available(Permits::new(available - self.waiter().amount));
                         acquire.commit()?;
-                        if waiter != null() {
-                            (*waiter).free();
-                            waiter = null();
-                        }
-                        self.step = AcquireStep::Done;
-                        return Ok(Poll::Ready(Ok(SemaphoreGuard::new(self.semaphore, self.amount))));
+                        *self.waiter().step.get() = AcquireStep::Done;
+                        return Ok(Poll::Ready(Ok(SemaphoreGuard::new(
+                            &*self.waiter().semaphore, self.waiter().amount))));
                     } else {
                         (available, null())
                     }
                 }
             };
-            if waiter == null() {
-                waiter = Waiter::new(cx, WaiterData {
-                    next: UnsafeCell::new(null()),
-                    amount: UnsafeCell::new(0),
-                    poisoned: UnsafeCell::new(false),
-                });
-            }
-            *(*waiter).next.get() = back;
-            *(*waiter).amount.get() = self.amount;
-            *acquire = Queued(waiter);
+            assert!(self.waiter().waker.poll(cx).is_pending());
+            *self.waiter().prev.get() = back;
+            *acquire = Queued(self.0.get());
             acquire.commit()?;
-            self.step = AcquireStep::Loop(waiter);
-            self.semaphore.release(available);
+            *self.waiter().step.get() = AcquireStep::Waiting;
+            if available > 0 {
+                (*self.waiter().semaphore).release(available);
+            }
             Ok(Poll::Pending)
         })
+    }
+    unsafe fn poll_waiting(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
+        match self.waiter().waker.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(poisoned) => {
+                *self.waiter().step.get() = AcquireStep::Done;
+                if poisoned {
+                    Poll::Ready(Err(AcquireError))
+                } else {
+                    Poll::Ready(Ok(SemaphoreGuard::new(&*self.waiter().semaphore, self.waiter().amount)))
+                }
+            }
+        }
     }
 }
 
@@ -252,22 +221,12 @@ impl<'a> Future for AcquireFuture<'a> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
-            match self.step {
-                AcquireStep::Enter => {
+            match *(*self.0.get()).step.get() {
+                AcquireStep::Entering => {
                     self.poll_enter(cx)
                 }
-                AcquireStep::Loop(waiter) => {
-                    match (*waiter).poll(cx) {
-                        Poll::Pending => Poll::Pending,
-                        Poll::Ready(data) => {
-                            self.step = AcquireStep::Done;
-                            if *data.poisoned.get() {
-                                Poll::Ready(Err(AcquireError))
-                            } else {
-                                Poll::Ready(Ok(SemaphoreGuard::new(self.semaphore, self.amount)))
-                            }
-                        }
-                    }
+                AcquireStep::Waiting => {
+                    self.poll_waiting(cx)
                 }
                 AcquireStep::Done => panic!("Polling completed future.")
             }
@@ -292,23 +251,30 @@ impl Future for AcquireFutureArc {
     }
 }
 
-impl Unpin for AcquireFutureArc {}
-
 impl<'a> Drop for AcquireFuture<'a> {
     fn drop(&mut self) {
         unsafe {
-            match self.step {
-                AcquireStep::Loop(waiter) => {
-                    match (*waiter).cancel() {
-                        CancelResult::Cancelled => {
-                            self.semaphore.release(0);
+            match *self.waiter().step.get() {
+                AcquireStep::Waiting => {
+                    match self.waiter().waker.start_cancel() {
+                        CancelResult::Cancelling => {
+                            (*self.waiter().semaphore).next_cancel.transact(|mut next_cancel| {
+                                *self.waiter().next_cancel.get() = *next_cancel;
+                                *next_cancel = self.0.get();
+                                next_cancel.commit()?;
+                                Ok(())
+                            });
+                            (*self.waiter().semaphore).release(0);
+                            self.waiter().waker.wait_cancel();
                         }
-                        CancelResult::Finished(data) => {
-                            self.semaphore.release(*data.amount.get());
+                        CancelResult::Finished { poisoned } => {
+                            if !poisoned {
+                                (*self.waiter().semaphore).release(self.waiter().amount);
+                            }
                         }
                     }
                 }
-                AcquireStep::Enter { .. } => {}
+                AcquireStep::Entering { .. } => {}
                 AcquireStep::Done => {}
             }
         }
@@ -348,55 +314,102 @@ impl<'a> ReleaseAction<'a> {
     unsafe fn flip(&mut self) {
         self.sem.acquire.transact(|mut acquire| {
             Ok(match *acquire {
-                Queued(back) if back == null() => {
+                Queued(back) if back == null() && *self.sem.front.get() == null() => {
                     *acquire = Available(self.releasable);
                     acquire.commit()?;
                     self.releasable = Permits::new(0);
                 }
                 Available(available) => {
+                    assert!(*self.sem.front.get() == null());
                     *acquire = Available(available + self.releasable);
                     acquire.commit()?;
                     self.releasable = Permits::new(0);
                 }
                 Queued(mut back) => {
-                    *acquire = Queued(null());
-                    acquire.commit()?;
-                    while back != null() {
-                        let next = *(*back).next.get();
-                        *(*back).next.get() = *self.sem.front.get();
-                        *self.sem.front.get() = back;
-                        back = next;
+                    if back != null() {
+                        *acquire = Queued(null());
+                        acquire.commit()?;
+                        let mut waiter = back;
+                        while waiter != null() {
+                            let prev = *(*waiter).prev.get();
+                            if prev == null() {
+                                let middle = *self.sem.middle.get();
+                                if middle == null() {
+                                    *self.sem.front.get() = waiter;
+                                    *self.sem.middle.get() = waiter;
+                                } else {
+                                    *(*middle).next.get() = waiter;
+                                    *(*waiter).prev.get() = middle;
+                                }
+                                break;
+                            }
+                            *(*prev).next.get() = waiter;
+                            waiter = prev;
+                        }
+                        *self.sem.middle.get() = back;
                     }
                 }
             })
         })
     }
 
+    unsafe fn cancel(&mut self, mut next_cancel: *const Waiter) {
+        while next_cancel != null() {
+            let next = *(*next_cancel).next.get();
+            let prev = *(*next_cancel).prev.get();
+            if prev == null() {
+                *self.sem.front.get() = next;
+            } else {
+                *(*prev).next.get() = next;
+            }
+            if next == null() {
+                *self.sem.middle.get() = prev;
+            }else{
+                *(*next).prev.get() = prev;
+            }
+            let waker = &(*next_cancel).waker as *const AtomicWaker;
+            next_cancel = *(*next_cancel).next_cancel.get();
+            AtomicWaker::check_cancelled(waker);
+        }
+    }
+
     unsafe fn try_pop(&mut self) -> bool {
         let front = *self.sem.front.get();
-        let amount = *(*front).amount.get();
         if let Some(releasable) = self.releasable.into_usize() {
-            if amount <= releasable {
-                *self.sem.front.get() = *(*front).next.get();
-                match (*front).finish() {
-                    FinishResult::Cancelled => {
-                        return true;
+            if (*front).amount <= releasable {
+                let next = *(*front).next.get();
+                match AtomicWaker::finish(&(*front).waker, false) {
+                    FinishResult::Cancelling => {
+                        return false;
                     }
-                    FinishResult::Finished => {
-                        self.releasable = Permits::new(releasable - amount);
+                    FinishResult::Finished { .. } => {
+                        self.releasable = Permits::new(releasable - (*front).amount);
+                        *self.sem.front.get() = next;
+                        if next == null() {
+                            *self.sem.middle.get() = null();
+                        } else {
+                            *(*next).prev.get() = null();
+                        }
                         return true;
                     }
                 }
             }
         } else {
-            *self.sem.front.get() = *(*front).next.get();
-            *(*front).poisoned.get() = true;
-            (*front).finish();
-            return true;
-        }
-        let next = *(*front).next.get();
-        if (*front).check_cancelled() {
-            *self.sem.front.get() = next;
+            let next = *(*front).next.get();
+            match AtomicWaker::finish(&(*front).waker, true) {
+                FinishResult::Cancelling => {
+                    return false;
+                }
+                FinishResult::Finished { .. } => {
+                    *self.sem.front.get() = next;
+                    if next == null() {
+                        *self.sem.middle.get() = null();
+                    } else {
+                        *(*next).prev.get() = null();
+                    }
+                    return true;
+                }
+            }
             return true;
         }
         false
@@ -428,11 +441,9 @@ impl<'a> ReleaseAction<'a> {
             return;
         }
         loop {
-            if *self.sem.front.get() == null() {
-                // If the front is empty and there are waiters at the back of the queue, move them
-                // to the front. Otherwise make the permits acquirable.
-                self.flip();
-            }
+            let next_cancel = self.sem.next_cancel.swap(null(), AcqRel);
+            self.flip();
+            self.cancel(next_cancel);
             if *self.sem.front.get() != null() {
                 // Try to complete one acquire and pop it from the queue.
                 if self.try_pop() {
@@ -457,17 +468,24 @@ impl Semaphore {
             acquire: Atomic::new(Available(Permits::new(initial))),
             release: Atomic::new(Unlocked(Permits::new(0))),
             front: UnsafeCell::new(null()),
+            middle: UnsafeCell::new(null()),
+            next_cancel: Atomic::new(null()),
         }
     }
 
     /// Wait until there are no older pending calls to `acquire` and at least `amount` permits available.
     /// Then consume the requested permits and return a `SemaphoreGuard`.
     pub fn acquire(&self, amount: usize) -> AcquireFuture {
-        AcquireFuture {
+        AcquireFuture(UnsafeCell::new(Waiter {
             semaphore: self,
+            step: UnsafeCell::new(AcquireStep::Entering),
+            waker: unsafe { AtomicWaker::new() },
             amount,
-            step: AcquireStep::Enter,
-        }
+            next: UnsafeCell::new(null()),
+            prev: UnsafeCell::new(null()),
+            next_cancel: UnsafeCell::new(null()),
+
+        }), PhantomData)
     }
 
     /// Like `acquire`, but fails if the call would block.
@@ -525,6 +543,5 @@ impl Semaphore {
             ReleaseAction { sem: self, releasable: Permits::poison() }.release();
         }
     }
-
 }
 

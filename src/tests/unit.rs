@@ -41,12 +41,12 @@ struct TestFuture<'a> {
 
 impl<'a> Debug for TestFuture<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TestFuture")
-            .field("waker", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&self.waker) }.0))
-            .field("woken", &(self.count.get() != self.old_count))
-            .field("inner_ptr", &(self.inner.as_ref().get_ref() as *const AcquireFuture))
-            .field("amount", &self.amount)
-            .field("inner", &self.inner)
+        f.debug_struct("TF")
+            //.field("waker", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&self.waker) }.0))
+            .field("w", &(self.count.get() != self.old_count))
+            .field("p", &(self.inner.as_ref().get_ref() as *const AcquireFuture))
+            //.field("amount", &self.amount)
+            .field("i", &self.inner)
             .finish()
     }
 }
@@ -216,9 +216,15 @@ fn test_sequential() {
     let mut available = 0usize;
     let mut futures = BTreeMap::<usize, TestFuture>::new();
     let mut rng = XorShiftRng::seed_from_u64(954360855);
-    for _ in 0..1000000 {
+    for _ in 0..100000 {
+        println!();
+        println!("{:?}", semaphore);
+        for f in futures.iter() {
+            println!("{:?}", f);
+        }
         if rng.gen_bool(0.1) && futures.len() < 5 {
             let amount = rng.gen_range(0, 10);
+            println!("acquiring {:?}", amount);
             let mut fut = TestFuture::new(&semaphore, amount);
             if let Some(guard) = fut.poll() {
                 guard.unwrap().forget();
@@ -227,10 +233,10 @@ fn test_sequential() {
                 futures.insert(time, fut);
             }
             time += 1;
-        }
-        if rng.gen_bool(0.1) {
+        }else if rng.gen_bool(0.1) {
             let mut blocked = false;
             let mut ready = vec![];
+            println!("polling");
             for (time, fut) in futures.iter_mut() {
                 if rng.gen_bool(0.5) {
                     if let Some(guard) = fut.poll_if_woken() {
@@ -246,14 +252,12 @@ fn test_sequential() {
             for time in ready {
                 futures.remove(&time);
             }
-        }
-        if rng.gen_bool(0.1) && available < 30 {
-            //println!("{:?} {:?}", semaphore, available);
+        }else if rng.gen_bool(0.1) && available < 30 {
+
             let amount = rng.gen_range(0, 10);
-            //println!("releasing {:?}", amount);
+            println!("releasing {:?}", amount);
             available = available.checked_add(amount).unwrap();
             semaphore.release(amount);
-            //println!("{:?} {:?}", semaphore, available);
         }
     }
 }
@@ -279,7 +283,7 @@ fn test_multicore_impl() {
         let barrier = barrier.clone();
         let poisoned = poisoned.clone();
         let pending_max = pending_max.clone();
-        move ||  {
+        move || {
             let mut time = 0;
             let mut futures = BTreeMap::<usize, TestFuture>::new();
             let on_guard = |guard: Result<SemaphoreGuard, AcquireError>| {

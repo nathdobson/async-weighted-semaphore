@@ -1,75 +1,69 @@
 use std::cell::UnsafeCell;
 use std::task::{Waker, Poll, Context};
-use std::sync::atomic::Ordering::{Acquire};
-use crate::waker::Flag::{Sleeping, Storing, Finished, Cancelled, Loading};
+use std::sync::atomic::Ordering::{Acquire, SeqCst};
+use crate::waker::Flag::{Sleeping, Storing, Finished, Cancelled, Loading, Cancelling};
 use crate::atomic::{Atomic, Packable};
-use std::mem;
+use std::{mem, thread, fmt};
 use std::ops::Deref;
+use std::thread::Thread;
+use std::fmt::{Debug, Formatter};
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 enum Flag {
-    // There is a valid waker. The waker lock is not held. No operations are in progress.
     Sleeping,
-    // A spurious poll has occurred. The poll holds the waker lock and is storing a waker.
     Storing,
-    // A finish has started. The finish holds the waker lock and is loading a waker.
-    Loading,
-    // A finish has started.
-    Finished,
-    // The future has been cancelled.
+    Loading { poisoned: bool },
+    Finished { poisoned: bool },
+    Cancelling,
     Cancelled,
 }
 
-pub struct Waiter<T> {
+pub struct AtomicWaker {
     state: Atomic<Flag>,
     waker: UnsafeCell<Option<Waker>>,
-    contents: UnsafeCell<Option<T>>,
+    thread: UnsafeCell<Option<Thread>>,
 }
 
-impl Packable for Flag {
-    unsafe fn encode(val: Self) -> usize {
-        mem::transmute::<_, u8>(val) as usize
-    }
-
-    unsafe fn decode(val: usize) -> Self {
-        mem::transmute(val as u8)
-    }
-}
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 pub enum FinishResult {
-    Cancelled,
-    Finished,
+    Cancelling,
+    Finished { poisoned: bool },
 }
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
-pub enum CancelResult<T> {
-    Cancelled,
-    Finished(T),
+pub enum CancelResult {
+    Cancelling,
+    Finished { poisoned: bool },
 }
 
-impl<T> Waiter<T> {
-    pub unsafe fn new(cx: &mut Context, contents: T) -> *const Self {
-        Box::into_raw(Box::new(Waiter {
+unsafe impl Send for AtomicWaker {}
+
+unsafe impl Sync for AtomicWaker {}
+
+impl Packable for Flag {
+    unsafe fn encode(val: Self) -> usize {
+        mem::transmute::<_, u16>(val) as usize
+    }
+
+    unsafe fn decode(val: usize) -> Self {
+        mem::transmute(val as u16)
+    }
+}
+
+impl AtomicWaker {
+    pub unsafe fn new() -> Self {
+        AtomicWaker {
             state: Atomic::new(Sleeping),
-            waker: UnsafeCell::new(Some(cx.waker().clone())),
-            contents: UnsafeCell::new(Some(contents)),
-        }))
-    }
-
-    unsafe fn take(&self) -> T {
-        (*self.contents.get()).take().unwrap()
-    }
-
-    pub unsafe fn free(&self) -> Option<T> {
-        (*Box::from_raw(self as *const Self as *mut Self).contents.get()).take()
+            waker: UnsafeCell::new(None),
+            thread: UnsafeCell::new(None),
+        }
     }
 
     // Poll until the future is finished.
     #[must_use]
-    pub unsafe fn poll(&self, context: &mut Context) -> Poll<T> {
+    pub unsafe fn poll(&self, context: &mut Context) -> Poll<bool> {
         self.state.transact(|mut state| {
-            //println!("Polling {:?} {:?}", self as *const Self, *state);
             Ok(match *state {
                 Sleeping => {
                     *state = Storing;
@@ -83,115 +77,132 @@ impl<T> Waiter<T> {
                                 state.commit()?;
                                 Poll::Pending
                             }
-                            Loading => unreachable!(),
-                            Finished => Poll::Ready(self.free().unwrap()),
+                            Loading { poisoned } => unreachable!(),
+                            Finished { poisoned } => Poll::Ready(poisoned),
                             Cancelled => panic!("Poll after cancel"),
+                            Cancelling => panic!("Poll after cancel"),
                         })
                     })
                 }
                 Storing => panic!("Concurrent poll"),
-                Loading => {
-                    let result = self.take();
-                    *state = Finished;
-                    if let Err(e) = state.commit() {
-                        *self.contents.get() = Some(result);
-                        return Err(e);
-                    }
-                    Poll::Ready(result)
+                Loading { poisoned } => {
+                    *state = Finished { poisoned };
+                    state.commit()?;
+                    Poll::Ready(poisoned)
                 }
-                Finished => Poll::Ready(self.free().unwrap()),
+                Finished { poisoned } => Poll::Ready(poisoned),
                 Cancelled => panic!("Poll after cancel"),
+                Cancelling => panic!("Poll after cancel"),
             })
         })
     }
 
     // Signal that the future is finished.
-    pub unsafe fn finish(&self) -> FinishResult {
-        self.state.transact(|mut state| {
+    pub unsafe fn finish(this: *const Self, poisoned: bool) -> FinishResult {
+        (*this).state.transact(|mut state| {
             //println!("Finishing {:?} {:?}", self as *const Self, *state);
             Ok(match *state {
                 Sleeping => {
-                    *state = Loading;
+                    *state = Loading { poisoned };
                     state.commit()?;
-                    (*self.waker.get()).take().unwrap().wake();
-                    self.state.transact(|mut state| {
+                    (*(*this).waker.get()).take().unwrap().wake();
+                    (*this).state.transact(|mut state| {
                         Ok(match *state {
                             Sleeping => unreachable!(),
                             Storing => unreachable!(),
-                            Loading => {
-                                *state = Finished;
+                            Loading { poisoned } => {
+                                *state = Finished { poisoned };
                                 state.commit()?;
-                                FinishResult::Finished
+                                FinishResult::Finished { poisoned }
                             }
-                            Finished => {
-                                self.free();
-                                FinishResult::Finished
+                            Finished { poisoned } =>
+                                FinishResult::Finished { poisoned },
+
+                            Cancelling => {
+                                FinishResult::Cancelling
                             }
-                            Cancelled => {
-                                self.free();
-                                FinishResult::Cancelled
-                            }
+                            Cancelled => panic!("Finish twice"),
                         })
                     })
                 }
                 Storing => {
-                    *state = Finished;
+                    *state = Finished { poisoned };
                     state.commit()?;
-                    FinishResult::Finished
+                    FinishResult::Finished { poisoned }
                 }
-                Loading => panic!("Concurrent finish"),
-                Finished => panic!("Finished twice"),
-                Cancelled => {
-                    self.free();
-                    FinishResult::Cancelled
+                Loading { poisoned } => panic!("Concurrent finish"),
+                Finished { poisoned } => panic!("Finished twice"),
+                Cancelling => {
+                    FinishResult::Cancelling
                 }
+                Cancelled => panic!("Finish twice"),
             })
         })
     }
 
     // Signal that the future has been dropped.
-    pub unsafe fn cancel(&self) -> CancelResult<T> {
+    pub unsafe fn start_cancel(&self) -> CancelResult {
         self.state.transact(|mut state| {
             Ok(match *state {
-                Sleeping => {
-                    *state = Cancelled;
+                Sleeping | Loading { .. } => {
+                    *self.thread.get() = Some(thread::current());
+                    *state = Cancelling;
                     state.commit()?;
-                    CancelResult::Cancelled
+                    CancelResult::Cancelling
                 }
                 Storing => panic!("Cancel while polling"),
-                Loading => {
-                    *state = Cancelled;
-                    state.commit()?;
-                    CancelResult::Cancelled
+                Finished { poisoned } => {
+                    CancelResult::Finished { poisoned }
                 }
-                Finished => {
-                    CancelResult::Finished(self.free().unwrap())
-                }
+                Cancelling => panic!("Double cancel"),
                 Cancelled => panic!("Double cancel"),
             })
         })
     }
 
+    pub unsafe fn wait_cancel(&self) {
+        loop {
+            match self.state.load(Acquire) {
+                Cancelling => thread::park(),
+                Cancelled => break,
+                _ => panic!(),
+            }
+        }
+    }
+
     // Check if the future has been cancelled.
-    pub unsafe fn check_cancelled(&self) -> bool {
-        if self.state.load(Acquire) == Cancelled {
-            self.free();
-            true
-        } else { false }
+    pub unsafe fn check_cancelled(this: *const Self) -> bool {
+        (*this).state.transact(|mut state| {
+            Ok(match *state {
+                Sleeping => false,
+                Storing => false,
+                Loading { poisoned } => panic!("Checking during finish"),
+                Finished { poisoned } => panic!("Checking after finish"),
+                Cancelling => {
+                    *state = Cancelled;
+                    state.commit()?;
+                    (*(*this).thread.get()).as_ref().unwrap().unpark();
+                    true
+                }
+                Cancelled => panic!("Double finish")
+            })
+        })
     }
 }
 
-impl<T> Deref for Waiter<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { (*self.contents.get()).as_ref().unwrap() }
+impl Debug for AtomicWaker {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AW")
+            .field("s", &self.state.load(SeqCst))
+            .field("w", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&*self.waker.get()) }.0))
+            .field("t", unsafe { &*self.thread.get() })
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::waker::{Waiter, FinishResult, CancelResult};
+    use crate::waker::{FinishResult, CancelResult, AtomicWaker};
     use std::future::Future;
     use futures::task::{Context, Poll};
     use std::pin::Pin;
@@ -207,9 +218,8 @@ mod test {
     use std::thread;
     use futures_test::std_reexport::sync::mpsc::sync_channel;
 
-    #[derive(Clone)]
     struct Tester {
-        waiter: *const Waiter<UnsafeCell<Box<usize>>>,
+        waiter: AtomicWaker,
     }
 
     unsafe impl Send for Tester {}
@@ -219,18 +229,10 @@ mod test {
     impl Unpin for Tester {}
 
     impl Future for Tester {
-        type Output = usize;
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        type Output = bool;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
             unsafe {
-                if self.waiter == null() {
-                    self.waiter = Waiter::new(cx, UnsafeCell::new(Box::new(0)));
-                    Poll::Pending
-                } else {
-                    match (*self.waiter).poll(cx) {
-                        Poll::Pending => Poll::Pending,
-                        Poll::Ready(x) => Poll::Ready(**x.get())
-                    }
-                }
+                self.waiter.poll(cx)
             }
         }
     }
@@ -239,13 +241,13 @@ mod test {
     fn test_finish() {
         block_on(async {
             unsafe {
-                let tester = Tester { waiter: null() };
+                let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert!(!(*tester.as_mut().waiter).check_cancelled());
-                **(*tester.as_mut().waiter).get() = 1;
-                assert_eq!(FinishResult::Finished, (*tester.waiter).finish());
-                assert_eq!(Poll::Ready(1), poll!(&mut tester));
+                assert!(!AtomicWaker::check_cancelled(&tester.waiter as *const AtomicWaker));
+                assert_eq!(FinishResult::Finished { poisoned: false },
+                           AtomicWaker::finish(&tester.waiter as *const AtomicWaker, false));
+                assert_eq!(Poll::Ready(false), poll!(&mut tester));
             }
         });
     }
@@ -254,15 +256,18 @@ mod test {
     fn test_cancel() {
         block_on(async {
             unsafe {
-                let tester = Tester { waiter: null() };
+                let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert!(!(*tester.as_mut().waiter).check_cancelled());
-                match (*tester.waiter).cancel() {
-                    CancelResult::Cancelled => {}
-                    CancelResult::Finished(_) => panic!(),
+                assert!(!AtomicWaker::check_cancelled(&tester.as_mut().waiter));
+
+                match tester.waiter.start_cancel() {
+                    CancelResult::Cancelling => {
+                        assert!(AtomicWaker::check_cancelled(&tester.as_mut().waiter));
+                        tester.waiter.wait_cancel();
+                    }
+                    CancelResult::Finished { poisoned } => panic!(),
                 }
-                assert!((*tester.as_mut().waiter).check_cancelled());
             }
         });
     }
@@ -271,15 +276,15 @@ mod test {
     fn test_finish_cancel() {
         block_on(async {
             unsafe {
-                let tester = Tester { waiter: null() };
+                let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert!(!(*tester.as_mut().waiter).check_cancelled());
-                **(*tester.as_mut().waiter).get() = 1;
-                assert_eq!(FinishResult::Finished, (*tester.waiter).finish());
-                match (*tester.waiter).cancel() {
-                    CancelResult::Cancelled => panic!(),
-                    CancelResult::Finished(x) => { assert_eq!(**x.get(), 1) }
+                assert!(!AtomicWaker::check_cancelled(&tester.as_mut().waiter));
+                assert_eq!(FinishResult::Finished { poisoned: true },
+                           AtomicWaker::finish(&tester.waiter, true));
+                match tester.waiter.start_cancel() {
+                    CancelResult::Cancelling => panic!(),
+                    CancelResult::Finished { poisoned } => { assert!(poisoned) }
                 }
             }
         });
@@ -290,16 +295,17 @@ mod test {
     fn test_cancel_finish() {
         block_on(async {
             unsafe {
-                let tester = Tester { waiter: null() };
+                let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert!(!(*tester.as_mut().waiter).check_cancelled());
-                match (*tester.waiter).cancel() {
-                    CancelResult::Cancelled => {}
-                    CancelResult::Finished(_) => panic!(),
+                assert!(!AtomicWaker::check_cancelled(&tester.as_mut().waiter));
+                match tester.waiter.start_cancel() {
+                    CancelResult::Cancelling => {
+                        assert!(AtomicWaker::check_cancelled(&tester.waiter));
+                        tester.waiter.wait_cancel();
+                    }
+                    CancelResult::Finished { poisoned } => panic!(),
                 }
-                **(*tester.as_mut().waiter).get() = 1;
-                assert_eq!(FinishResult::Cancelled, (*tester.waiter).finish());
             }
         });
     }
@@ -307,17 +313,21 @@ mod test {
     fn test_race(finish: bool, cancel: bool) {
         unsafe {
             let iters = 10000;
+            let mut testers = (0..iters).map(|_| Tester { waiter: AtomicWaker::new() }).collect::<Vec<_>>();
             let (send, recv) = sync_channel(0);
             let h1 = thread::spawn(move || block_on(async {
                 let mut results = vec![];
-                for _ in 0..iters {
-                    let mut tester = Tester { waiter: null() };
+                for i in 0..iters {
+                    let mut tester = &mut testers[i];
                     assert_eq!(Poll::Pending, poll!(&mut tester));
-                    send.send(tester.clone()).unwrap();
+                    send.send(&*(&tester.waiter as *const AtomicWaker)).unwrap();
                     let result = if cancel {
-                        match (*tester.waiter).cancel() {
-                            CancelResult::Cancelled => None,
-                            CancelResult::Finished(data) => Some(**data.get()),
+                        match tester.waiter.start_cancel() {
+                            CancelResult::Cancelling => {
+                                tester.waiter.wait_cancel();
+                                None
+                            }
+                            CancelResult::Finished { poisoned } => Some(poisoned),
                         }
                     } else {
                         Some(tester.await)
@@ -329,13 +339,18 @@ mod test {
             let h2 = thread::spawn(move || block_on(async {
                 let mut results = vec![];
                 for i in 0..iters {
-                    let tester = recv.recv().unwrap();
+                    let mut waiter = recv.recv().unwrap();
                     let result = if finish {
-                        **(*tester.waiter).get() = i;
-                        (*tester.waiter).finish()
+                        match AtomicWaker::finish(waiter, i % 2 == 0) {
+                            FinishResult::Cancelling => {
+                                AtomicWaker::check_cancelled(waiter);
+                                FinishResult::Cancelling
+                            }
+                            FinishResult::Finished { poisoned } => FinishResult::Finished { poisoned }
+                        }
                     } else {
-                        while !(*tester.waiter).check_cancelled() {}
-                        FinishResult::Cancelled
+                        while !AtomicWaker::check_cancelled(waiter) {}
+                        FinishResult::Cancelling
                     };
                     results.push(result);
                 }
@@ -345,8 +360,8 @@ mod test {
             let r2 = h2.join().unwrap();
             for (i, (send, recv)) in r1.into_iter().zip(r2.into_iter()).enumerate() {
                 match (finish, cancel, send, recv) {
-                    (true, _, Some(o), FinishResult::Finished) if i == o => {}
-                    (_, true, None, FinishResult::Cancelled) => {}
+                    (true, _, Some(o), FinishResult::Finished { poisoned: i }) if i == o => {}
+                    (_, true, None, FinishResult::Cancelling) => {}
                     _ => panic!("Unexpected outcome {:?}", (finish, cancel, send, recv))
                 }
             }
