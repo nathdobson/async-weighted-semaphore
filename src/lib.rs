@@ -94,31 +94,19 @@ impl Display for TryAcquireError {
 /// assert!(sem.try_acquire(1).is_err());
 /// ```
 ///
-/// # Performance
-/// This implementation is wait-free except for the use of dynamic allocation.
 /// # Poisoning
 /// If a guard is dropped while panicking, or the number of available permits exceeds `MAX_AVAILABLE`,
 /// the semaphore will be permanently poisoned. All current and future acquires will fail immediately,
 /// and release will become a no-op.
+/// # Performance Considerations
+/// `Semaphore` uses no heap allocations. Most calls are lock-free. The only case that may wait for a
+/// lock is cancelling an `AcquireFuture`. If `AcquireFuture::drop` is called before
+/// `AcquireFuture::poll` returns `Poll::Ready`, it may synchronously wait for a lock.
 pub struct Semaphore {
-    // The nominal state of this semaphore is a queue of Waiters, a counter of available permits,
-    // and a release lock guarding the process of popping Waiters off the queue and waking them.
-    // The counter of available permits is stored by acquire, release, and the release lock owner.
-    // The queue is stored by a pair of stacks is opposing directions. The front is guarded by the
-    // release lock. The back is encoded in acquire if present.
-
-    // The information needed to acquire.
     acquire: Atomic<AcquireState>,
-
-    // The state of release operations.
     release: Atomic<ReleaseState>,
-
-    // The front of the queue (owned by the release lock owner).
     front: UnsafeCell<*const Waiter>,
-
     middle: UnsafeCell<*const Waiter>,
-
-    // The next waiter to cancel
     next_cancel: Atomic<*const Waiter>,
 }
 
