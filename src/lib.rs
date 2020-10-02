@@ -1,4 +1,4 @@
-//! An async weighted semaphore.
+//! An async weighted [`Semaphore`].
 #![allow(unused_imports)]
 
 mod atomic;
@@ -32,8 +32,7 @@ use std::marker::PhantomData;
 use crate::state::AcquireStep;
 use crate::waker::{AtomicWaker, CancelResult, FinishResult};
 
-/// An error returned from the `acquire` method on `Semaphore`.
-/// This error indicates that the `Semaphore` is poisoned.
+/// An error returned by [`Semaphore::acquire`] to indicate the Semaphore has been poisoned.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone, Copy)]
 pub struct AcquireError;
 
@@ -64,44 +63,41 @@ impl Display for TryAcquireError {
 }
 
 /// An async weighted semaphore.
-/// A `Semaphore` is a synchronization primitive for limiting concurrent usage of a resource.
+/// A semaphore is a synchronization primitive for limiting concurrent usage of a resource or
+/// signaling availability of a resource.
 ///
-/// A `Semaphore` starts with an initial number of permits available. When a client `acquire`s a number
-/// of permits, the permits become unavailable. If a client attempts to `acquire` more permits
-/// than are available, the call will block. With the permits `acquire`d, the client may safely
-/// use that amount of the shared resource. When the client is done with the resource, it should
-/// `release` the the permits to make them available.
+/// A `Semaphore` starts with an initial counter of permits. Calling [release](#method.release) will increase the
+/// counter. Calling [acquire](#method.acquire) will attempt to decrease the counter, waiting if needed.
 ///
-/// # Priority Policy
-/// `acquire` provides FIFO semantics: calls to `acquire` finish in the same order that
+/// # Priority
+/// Acquiring provides FIFO semantics: calls to `acquire` finish in the same order that
 /// they start. If there is a pending call to `acquire`, a new call to `acquire` will always block,
 /// even if there are enough permits available for the new call. This policy reduces starvation and
 /// tail latency at the cost of utilization.
 /// ```
-/// use async_weighted_semaphore::Semaphore;
-/// use futures::executor::LocalPool;
-/// use futures::task::{LocalSpawnExt, SpawnExt};
-/// use std::rc::Rc;
-///
-/// let sem = Rc::new(Semaphore::new(1));
-/// let mut pool = LocalPool::new();
-/// let spawn = pool.spawner();
-/// // Begin a call to acquire(2).
-/// spawn.spawn_local({let sem = sem.clone(); async move{ sem.acquire(2).await.unwrap().forget(); }});
-/// // Ensure the call to acquire(2) has started.
-/// pool.run_until_stalled();
-/// // There is 1 permit available, but it cannot be acquired.
-/// assert!(sem.try_acquire(1).is_err());
+/// # use async_weighted_semaphore::Semaphore;
+/// # use futures::executor::block_on;
+/// # block_on(async{
+/// # use futures::pin_mut;
+/// # use futures::poll;
+/// let sem = Semaphore::new(1);
+/// let a = sem.acquire(2);
+/// let b = sem.acquire(1);
+/// pin_mut!(a);
+/// pin_mut!(b);
+/// assert!(poll!(&mut a).is_pending());
+/// assert!(poll!(&mut b).is_pending());
+/// # });
 /// ```
 ///
 /// # Poisoning
-/// If a guard is dropped while panicking, or the number of available permits exceeds `MAX_AVAILABLE`,
-/// the semaphore will be permanently poisoned. All current and future acquires will fail immediately,
+/// If a guard is dropped while panicking, or the number of available permits exceeds [`Self::MAX_AVAILABLE`],
+/// the semaphore will be permanently poisoned. All current and future acquires will fail,
 /// and release will become a no-op.
 /// # Performance Considerations
-/// `Semaphore` uses no heap allocations. Most calls are lock-free. The only case that may wait for a
-/// lock is cancelling an `AcquireFuture`. If `AcquireFuture::drop` is called before
-/// `AcquireFuture::poll` returns `Poll::Ready`, it may synchronously wait for a lock.
+/// `Semaphore` uses no heap allocations. Most calls are lock-free. The only action that may wait for a
+/// lock is cancelling an `AcquireFuture`. In other words, if an `AcquireFuture` is dropped before
+/// `AcquireFuture::poll` returns `Poll::Ready`, the drop may synchronously wait for a lock.
 pub struct Semaphore {
     acquire: Atomic<AcquireState>,
     release: Atomic<ReleaseState>,
@@ -110,10 +106,10 @@ pub struct Semaphore {
     next_cancel: Atomic<*const Waiter>,
 }
 
-/// A `Future` that `acquire`s a specified number of permits from a `Semaphore` and returns a `SemaphoreGuard`.
+/// A [`Future`] returned by [`Semaphore::acquire`] that yields a [`SemaphoreGuard`].
 pub struct AcquireFuture<'a>(UnsafeCell<Waiter>, PhantomData<&'a Semaphore>);
 
-/// A `Future` that `acquire`s a specified number of permits from an `Arc<Semaphore>` and returns a `SemaphoreGuardArc`.
+/// A [`Future`] returned by [`Semaphore::acquire_arc`] that yields a [`SemaphoreGuardArc`].
 pub struct AcquireFutureArc {
     arc: Arc<Semaphore>,
     inner: AcquireFuture<'static>,
@@ -193,6 +189,7 @@ impl<'a> AcquireFuture<'a> {
         match self.waiter().waker.poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(poisoned) => {
+                //println!("Ready {:?}", self.0.get());
                 *self.waiter().step.get() = AcquireStep::Done;
                 if poisoned {
                     Poll::Ready(Err(AcquireError))
@@ -244,6 +241,7 @@ impl<'a> Drop for AcquireFuture<'a> {
         unsafe {
             match *self.waiter().step.get() {
                 AcquireStep::Waiting => {
+                    //println!("Cancelling {:?}", self.0.get());
                     match self.waiter().waker.start_cancel() {
                         CancelResult::Cancelling => {
                             (*self.waiter().semaphore).next_cancel.transact(|mut next_cancel| {
@@ -265,6 +263,7 @@ impl<'a> Drop for AcquireFuture<'a> {
                 AcquireStep::Entering { .. } => {}
                 AcquireStep::Done => {}
             }
+            //println!("Dropping {:?} {:?}", self.0.get(), *self.waiter().step.get());
         }
     }
 }
@@ -352,12 +351,12 @@ impl<'a> ReleaseAction<'a> {
             }
             if next == null() {
                 *self.sem.middle.get() = prev;
-            }else{
+            } else {
                 *(*next).prev.get() = prev;
             }
             let waker = &(*next_cancel).waker as *const AtomicWaker;
             next_cancel = *(*next_cancel).next_cancel.get();
-            AtomicWaker::check_cancelled(waker);
+            AtomicWaker::accept_cancel(waker);
         }
     }
 
@@ -365,13 +364,15 @@ impl<'a> ReleaseAction<'a> {
         let front = *self.sem.front.get();
         if let Some(releasable) = self.releasable.into_usize() {
             if (*front).amount <= releasable {
+                let amount = (*front).amount;
                 let next = *(*front).next.get();
+                //println!("Finishing {:?}", front);
                 match AtomicWaker::finish(&(*front).waker, false) {
                     FinishResult::Cancelling => {
                         return false;
                     }
                     FinishResult::Finished { .. } => {
-                        self.releasable = Permits::new(releasable - (*front).amount);
+                        self.releasable = Permits::new(releasable - amount);
                         *self.sem.front.get() = next;
                         if next == null() {
                             *self.sem.middle.get() = null();
@@ -384,6 +385,7 @@ impl<'a> ReleaseAction<'a> {
             }
         } else {
             let next = *(*front).next.get();
+            //println!("Poisoning {:?}", front);
             match AtomicWaker::finish(&(*front).waker, true) {
                 FinishResult::Cancelling => {
                     return false;

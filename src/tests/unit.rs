@@ -217,14 +217,14 @@ fn test_sequential() {
     let mut futures = BTreeMap::<usize, TestFuture>::new();
     let mut rng = XorShiftRng::seed_from_u64(954360855);
     for _ in 0..100000 {
-        println!();
-        println!("{:?}", semaphore);
-        for f in futures.iter() {
-            println!("{:?}", f);
-        }
+        //println!();
+        // println!("{:?}", semaphore);
+        // for f in futures.iter() {
+        //     println!("{:?}", f);
+        // }
         if rng.gen_bool(0.1) && futures.len() < 5 {
             let amount = rng.gen_range(0, 10);
-            println!("acquiring {:?}", amount);
+            //println!("acquiring {:?}", amount);
             let mut fut = TestFuture::new(&semaphore, amount);
             if let Some(guard) = fut.poll() {
                 guard.unwrap().forget();
@@ -236,7 +236,7 @@ fn test_sequential() {
         }else if rng.gen_bool(0.1) {
             let mut blocked = false;
             let mut ready = vec![];
-            println!("polling");
+            //println!("polling");
             for (time, fut) in futures.iter_mut() {
                 if rng.gen_bool(0.5) {
                     if let Some(guard) = fut.poll_if_woken() {
@@ -255,7 +255,7 @@ fn test_sequential() {
         }else if rng.gen_bool(0.1) && available < 30 {
 
             let amount = rng.gen_range(0, 10);
-            println!("releasing {:?}", amount);
+            //println!("releasing {:?}", amount);
             available = available.checked_add(amount).unwrap();
             semaphore.release(amount);
         }
@@ -263,21 +263,21 @@ fn test_sequential() {
 }
 
 #[test]
-fn test_multicore() {
-    for i in 0..100 {
+fn test_parallel() {
+    for i in 0..1000 {
         println!("iteration {:?}", i);
-        test_multicore_impl();
+        test_parallel_impl();
     }
 }
 
-fn test_multicore_impl() {
+fn test_parallel_impl() {
     let threads = 10;
     let semaphore = Arc::new(Semaphore::new(0));
     let resource = Arc::new(AtomicIsize::new(0));
     let barrier = Arc::new(Barrier::new(threads));
     let poisoned = Arc::new(AtomicBool::new(false));
     let pending_max = Arc::new(AtomicIsize::new(-1));
-    (0..threads).map(|index| thread::Builder::new().name(format!("test_multicore_impl_{}", index)).spawn({
+    (0..threads).map(|index| thread::Builder::new().name(format!("test_parallel_impl_{}", index)).spawn({
         let semaphore = semaphore.clone();
         let resource = resource.clone();
         let barrier = barrier.clone();

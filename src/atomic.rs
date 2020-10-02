@@ -39,12 +39,12 @@ impl<'a, T: Packable> DerefMut for Transact<'a, T> {
 impl<'a, T: Packable> Transact<'a, T> {
     /// Try to commit a transaction to an atomic variable. Return an error containing the current
     /// value on error.
-    pub fn commit(self) -> Result<T, usize> {
+    pub fn commit(self) -> Result<T, T> {
         unsafe {
             match self.atom.0.compare_exchange_weak(
                 self.current, T::encode(self.new),
                 AcqRel, Acquire) {
-                Err(e) => Err(e),
+                Err(e) => Err(T::decode(e)),
                 Ok(_) => Ok(self.new),
             }
         }
@@ -64,7 +64,7 @@ impl<T: Packable> Atomic<T> {
     /// Perform a transaction (similar fetch_update).
     /// Calls the callback with the current value as a Transact. Callers may mutate this Transact
     /// and commit it. Errors from commit should be raised with '?'.
-    pub fn transact<'a, R>(&'a self, mut update: impl FnMut(Transact<'a, T>) -> Result<R, usize>) -> R {
+    pub fn transact<'a, R>(&'a self, mut update: impl FnMut(Transact<'a, T>) -> Result<R, T>) -> R {
         unsafe {
             let mut value = self.0.load(Acquire);
             loop {
@@ -73,7 +73,7 @@ impl<T: Packable> Atomic<T> {
                     current: value,
                     new: T::decode(value),
                 }) {
-                    Err(e) => value = e,
+                    Err(e) => value = T::encode(e),
                     Ok(v) => return v,
                 }
             }
