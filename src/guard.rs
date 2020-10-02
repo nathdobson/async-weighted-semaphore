@@ -3,18 +3,20 @@ use crate::Semaphore;
 use std::sync::Arc;
 use std::thread::panicking;
 
-/// A guard returned by `acquire` that will `release` the acquired permits when `Drop`ped. This
-/// contains a reference to the original semaphore, so it is not `'static`.
+/// A guard returned by [`Semaphore::acquire`] that will call [`Semaphore::release`] when it
+/// is dropped (falls out of scope).
 #[derive(Debug)]
+#[must_use]
 pub struct SemaphoreGuard<'a> {
     semaphore: &'a Semaphore,
     amount: usize,
     panicking: bool,
 }
 
-/// A guard returned by `acquire` that will `release` the acquired permits when `Drop`ped. This
-/// contains an Arc<Semaphore>, so it is `'static', `Send` and `Sync`.
+/// A guard returned by [`Semaphore::acquire_arc`] that will call [`Semaphore::release`] when it
+/// is dropped (falls out of scope). Can be sent between threads.
 #[derive(Debug)]
+#[must_use]
 pub struct SemaphoreGuardArc {
     semaphore: Option<Arc<Semaphore>>,
     amount: usize,

@@ -31,6 +31,7 @@ use std::fmt::Debug;
 use futures_test::futures_core_reexport::core_reexport::fmt::Formatter;
 use crate::{Semaphore, AcquireFuture, AcquireError, SemaphoreGuard};
 
+
 struct TestFuture<'a> {
     waker: Waker,
     count: AwokenCount,
@@ -74,9 +75,8 @@ impl<'a> TestFuture<'a> {
             None
         }
     }
-    fn forget(self) {
-        // Futures are Unpin, just not publicly.
-        mem::forget(*Pin::into_inner(self.inner))
+    fn into_inner(self) -> Pin<Box<AcquireFuture<'a>>> {
+        self.inner
     }
 }
 
@@ -143,7 +143,11 @@ fn test_leak() {
     let semaphore = Semaphore::new(1);
     let mut a1 = TestFuture::new(&semaphore, 2);
     assert!(a1.poll().is_none());
-    a1.forget();
+    lazy_static! {
+        static ref SUPPRESS: Mutex<usize> = Mutex::new(0);
+    }
+    unsafe { *SUPPRESS.lock().unwrap() = Box::into_raw(Pin::into_inner_unchecked(a1.into_inner())) as usize; }
+    mem::drop(semaphore);
 }
 
 #[test]
@@ -233,7 +237,7 @@ fn test_sequential() {
                 futures.insert(time, fut);
             }
             time += 1;
-        }else if rng.gen_bool(0.1) {
+        } else if rng.gen_bool(0.1) {
             let mut blocked = false;
             let mut ready = vec![];
             //println!("polling");
@@ -252,8 +256,7 @@ fn test_sequential() {
             for time in ready {
                 futures.remove(&time);
             }
-        }else if rng.gen_bool(0.1) && available < 30 {
-
+        } else if rng.gen_bool(0.1) && available < 30 {
             let amount = rng.gen_range(0, 10);
             //println!("releasing {:?}", amount);
             available = available.checked_add(amount).unwrap();

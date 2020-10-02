@@ -2,8 +2,9 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{Ordering, AtomicUsize};
 use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::marker::PhantomData;
-use std::mem;
+use std::{mem, thread};
 use std::thread::Thread;
+use std::time::Duration;
 
 /// An AtomicUsize containing a bitpacked `T` .
 pub struct Atomic<T: Packable>(AtomicUsize, PhantomData<T>);

@@ -64,7 +64,7 @@ impl Reader {
 impl Writer {
     async fn write_all(&self, buf: &[u8]) -> Result<(), AcquireError> {
         assert!(buf.len() < self.inner.0.buffer.lock().await.capacity());
-        self.inner.0.free.acquire(buf.len()).await?;
+        self.inner.0.free.acquire(buf.len()).await?.forget();
         let mut lock = self.inner.0.buffer.lock().await;
         lock.extend(buf.iter().cloned());
         mem::drop(lock);
@@ -89,7 +89,7 @@ impl Drop for WriterInner {
 fn test_pipe() {
     let threads = 10;
     let iters = 1000;
-    let (w, r) = pipe(10);
+    let (w, r) = pipe(20);
     for _ in 0..threads {
         let w = w.clone();
         thread::spawn(move || block_on(async {

@@ -134,17 +134,7 @@ impl AtomicWaker {
                     (*(*this).wakers[front as usize].get()).take().unwrap().wake();
                     Err(state)?
                 }
-                StoringEmpty { front } => {
-                    *state = Finished { poisoned };
-                    state.commit()?;
-                    FinishResult::Finished { poisoned }
-                }
-                LoadingEmpty { front } => {
-                    *state = Finished { poisoned };
-                    state.commit()?;
-                    FinishResult::Finished { poisoned }
-                }
-                LoadingStoring { front } => {
+                StoringEmpty { .. } | LoadingEmpty { .. } | LoadingStoring { .. } => {
                     *state = Finished { poisoned };
                     state.commit()?;
                     FinishResult::Finished { poisoned }
@@ -168,9 +158,9 @@ impl AtomicWaker {
         *self.thread.get() = Some(thread::current());
         self.state.transact(|mut state| {
             Ok(match *state {
-                ReadyEmpty { front }
-                | LoadingEmpty { front }
-                | LoadingReady { front } => {
+                ReadyEmpty { .. }
+                | LoadingEmpty { .. }
+                | LoadingReady { .. } => {
                     *state = Cancelling;
                     state.commit()?;
                     CancelResult::Cancelling
@@ -198,8 +188,9 @@ impl AtomicWaker {
             Ok(match *state {
                 Cancelling => {
                     *state = Cancelled;
+                    let thread = (*(*this).thread.get()).take().unwrap();
                     state.commit()?;
-                    (*(*this).thread.get()).as_ref().unwrap().unpark();
+                    thread.unpark();
                 }
                 _ => unreachable!("{:?}", *state)
             })
@@ -248,7 +239,7 @@ mod test {
 
     impl Future for Tester {
         type Output = bool;
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
             unsafe {
                 self.waiter.poll(cx)
             }
@@ -282,7 +273,7 @@ mod test {
                         AtomicWaker::accept_cancel(&tester.as_mut().waiter);
                         tester.waiter.wait_cancel();
                     }
-                    CancelResult::Finished { poisoned } => panic!(),
+                    CancelResult::Finished { .. } => panic!(),
                 }
             }
         });
@@ -318,7 +309,7 @@ mod test {
                         AtomicWaker::accept_cancel(&tester.waiter);
                         tester.waiter.wait_cancel();
                     }
-                    CancelResult::Finished { poisoned } => panic!(),
+                    CancelResult::Finished { .. } => panic!(),
                 }
             }
         });
@@ -353,7 +344,7 @@ mod test {
             let h2 = thread::spawn(move || block_on(async {
                 let mut results = vec![];
                 for i in 0..iters {
-                    let mut waiter = recv.recv().unwrap();
+                    let waiter = recv.recv().unwrap();
                     let result =
                         match AtomicWaker::finish(waiter, i % 2 == 0) {
                             FinishResult::Cancelling => {
@@ -369,7 +360,7 @@ mod test {
             }));
             let r1 = h1.join().unwrap();
             let r2 = h2.join().unwrap();
-            for (i, (send, recv)) in r1.into_iter().zip(r2.into_iter()).enumerate() {
+            for (send, recv) in r1.into_iter().zip(r2.into_iter()) {
                 match (cancel, send, recv) {
                     (_, Some(o), FinishResult::Finished { poisoned: i }) if i == o => {}
                     (true, None, FinishResult::Cancelling) => {}

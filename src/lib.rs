@@ -1,4 +1,4 @@
-//! An async weighted [`Semaphore`].
+//! An asynchronous weighted [`Semaphore`].
 #![allow(unused_imports)]
 
 mod atomic;
@@ -7,6 +7,11 @@ mod guard;
 mod state;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
+
 
 use crate::state::{DebugPtr, Waiter};
 use std::fmt::Display;
@@ -44,13 +49,13 @@ impl Display for AcquireError {
     }
 }
 
-/// An error returned from the `try_acquire` method on `Semaphore`.
+/// An error returned from the [`Semaphore::try_acquire`].
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq)]
 pub enum TryAcquireError {
-    /// There is insufficient capacity or a call to `acquire` is blocked, so it is not possible
-    /// to acquire without blocking.
+    /// [`Semaphore::try_acquire`] failed because [`Semaphore::acquire`] would have blocked. Either
+    /// there are insufficient available permits or there is another pending call to acquire.
     WouldBlock,
-    /// The call to `try_acquire` failed because the `Semaphore` is poisoned.
+    /// [`Semaphore::try_acquire`] failed because the `Semaphore` is poisoned.
     Poisoned,
 }
 
@@ -67,10 +72,10 @@ impl Display for TryAcquireError {
 /// signaling availability of a resource.
 ///
 /// A `Semaphore` starts with an initial counter of permits. Calling [release](#method.release) will increase the
-/// counter. Calling [acquire](#method.acquire) will attempt to decrease the counter, waiting if needed.
+/// counter. Calling [acquire](#method.acquire) will attempt to decrease the counter, waiting if necessary.
 ///
 /// # Priority
-/// Acquiring provides FIFO semantics: calls to `acquire` finish in the same order that
+/// Acquiring has "first-in-first-out" semantics: calls to `acquire` finish in the same order that
 /// they start. If there is a pending call to `acquire`, a new call to `acquire` will always block,
 /// even if there are enough permits available for the new call. This policy reduces starvation and
 /// tail latency at the cost of utilization.
@@ -93,8 +98,11 @@ impl Display for TryAcquireError {
 /// # Poisoning
 /// If a guard is dropped while panicking, or the number of available permits exceeds [`Self::MAX_AVAILABLE`],
 /// the semaphore will be permanently poisoned. All current and future acquires will fail,
-/// and release will become a no-op.
-/// # Performance Considerations
+/// and release will become a no-op. This is similar in principle to poisoning a [`std::sync::Mutex`].
+/// Explicitly poisoning with [`Semaphore::poison`] can also be useful to coordinate termination
+/// (e.g. closing a producer-consumer channel).
+///
+/// # Performance
 /// `Semaphore` uses no heap allocations. Most calls are lock-free. The only action that may wait for a
 /// lock is cancelling an `AcquireFuture`. In other words, if an `AcquireFuture` is dropped before
 /// `AcquireFuture::poll` returns `Poll::Ready`, the drop may synchronously wait for a lock.
@@ -106,10 +114,10 @@ pub struct Semaphore {
     next_cancel: Atomic<*const Waiter>,
 }
 
-/// A [`Future`] returned by [`Semaphore::acquire`] that yields a [`SemaphoreGuard`].
+/// A [`Future`] returned by [`Semaphore::acquire`] that produces a [`SemaphoreGuard`].
 pub struct AcquireFuture<'a>(UnsafeCell<Waiter>, PhantomData<&'a Semaphore>);
 
-/// A [`Future`] returned by [`Semaphore::acquire_arc`] that yields a [`SemaphoreGuardArc`].
+/// A [`Future`] returned by [`Semaphore::acquire_arc`] that produces a [`SemaphoreGuardArc`].
 pub struct AcquireFutureArc {
     arc: Arc<Semaphore>,
     inner: AcquireFuture<'static>,
@@ -151,7 +159,7 @@ impl<'a> AcquireFuture<'a> {
     unsafe fn waiter(&self) -> &Waiter {
         &*self.0.get()
     }
-    unsafe fn poll_enter(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
+    unsafe fn poll_enter(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
         (*self.waiter().semaphore).acquire.transact(|mut acquire| {
             let (available, back) = match *acquire {
                 Queued(back) => (0, back),
@@ -179,9 +187,8 @@ impl<'a> AcquireFuture<'a> {
             *acquire = Queued(self.0.get());
             acquire.commit()?;
             *self.waiter().step.get() = AcquireStep::Waiting;
-            if available > 0 {
-                (*self.waiter().semaphore).release(available);
-            }
+            // Even if available==0, this is necessary to mark the dirty bit.
+            (*self.waiter().semaphore).release(available);
             Ok(Poll::Pending)
         })
     }
@@ -204,7 +211,7 @@ impl<'a> AcquireFuture<'a> {
 impl<'a> Future for AcquireFuture<'a> {
     type Output = Result<SemaphoreGuard<'a>, AcquireError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
             match *(*self.0.get()).step.get() {
                 AcquireStep::Entering => {
@@ -312,7 +319,7 @@ impl<'a> ReleaseAction<'a> {
                     acquire.commit()?;
                     self.releasable = Permits::new(0);
                 }
-                Queued(mut back) => {
+                Queued(back) => {
                     if back != null() {
                         *acquire = Queued(null());
                         acquire.commit()?;
@@ -400,7 +407,6 @@ impl<'a> ReleaseAction<'a> {
                     return true;
                 }
             }
-            return true;
         }
         false
     }
@@ -431,15 +437,16 @@ impl<'a> ReleaseAction<'a> {
             return;
         }
         loop {
+            //println!("");
+            //println!("A {:?}",self.sem);
             let next_cancel = self.sem.next_cancel.swap(null(), AcqRel);
+            //println!("B {:?}",self.sem);
             self.flip();
+            //println!("C {:?}",self.sem);
             self.cancel(next_cancel);
-            if *self.sem.front.get() != null() {
-                // Try to complete one acquire and pop it from the queue.
-                if self.try_pop() {
-                    continue;
-                }
-            }
+            //println!("D {:?}",self.sem);
+            while *self.sem.front.get() != null() && self.try_pop() {}
+            //println!("E {:?}",self.sem);
             // Attempt to lose the release lock. If there are additional releasable permits, take
             // those instead of unlocking.
             if self.try_unlock() {
@@ -450,6 +457,8 @@ impl<'a> ReleaseAction<'a> {
 }
 
 impl Semaphore {
+    /// The maximum number of permits that can be made available. This is slightly smaller than
+    /// [`usize::MAX`].
     pub const MAX_AVAILABLE: usize = (1 << (size_of::<usize>() * 8 - 3)) - 1;
 
     /// Create a new semaphore with an initial number of permits.
