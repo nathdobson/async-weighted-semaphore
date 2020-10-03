@@ -1,71 +1,67 @@
 language: rust
 cache: cargo
 os: linux
-
-rust:
-  - stable
-  - beta
-  - nightly
-
-env:
-  - RELEASE=
-  - RELEASE=--release
-
-arch:
-  - amd64
-  - arm64
-  - ppc64le
-  - s390x
-
-script: cargo test $RELEASE
+stages:
+  - "functional"
+  - "sanitizer"
+  - "architecture"
+  - "compiler"
 
 jobs:
   include:
-    - arch: amd64
-      rust: stable
-      env: TARGET=i686
-      addons:
-        apt:
-          packages:
-            - gcc-multilib
-      script: &i686_script
-        - |
-          set -e
-          rustup target add i686-unknown-linux-gnu
-          cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
-    - arch: amd64
-      rust: beta
-      env: TARGET=i686
-      addons:
-        apt:
-          packages:
-            - gcc-multilib
-      script: *i686_script
-    - arch: amd64
+    - stage: "functional"
+    - stage: "functional"
+      env: RELEASE=true
+      script: cargo test --release
+
+    - stage: "sanitizer"
       rust: nightly
-      env: TARGET=i686
-      addons:
-        apt:
-          packages:
-            - gcc-multilib
-      script: *i686_script
-    - arch: amd64
-      rust: nightly
-      env: SANITIZER=address
       script: &sanitizer_script
         - |
           set -e
           rustup component add rust-src
           RUSTFLAGS=-Zsanitizer="$SANITIZER" cargo test --lib --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$SANITIZER"
-    - arch: amd64
+      env: SANITIZER=address
+    - stage: "sanitizer"
       rust: nightly
+      script: *sanitizer_script
       env: SANITIZER=memory
-      script: *sanitizer_script
-    - arch: amd64
+    - stage: "sanitizer"
       rust: nightly
+      script: *sanitizer_script
       env: SANITIZER=thread
-      script: *sanitizer_script
-    - arch: amd64
+    - stage: "sanitizer"
       rust: nightly
-      env: SANITIZER=leak
       script: *sanitizer_script
+      env: SANITIZER=leak
+
+    - stage: "arch"
+      script: cargo test
+      arch: arm64
+      env: TARGET=arm64
+    - stage: "arch"
+      script: cargo test
+      arch: ppc64le
+      env: TARGET=ppc64le
+    - stage: "arch"
+      script: cargo test
+      arch: s390x
+      env: TARGET=s390x
+    - stage: "arch"
+      addons:
+        apt:
+          packages:
+            - gcc-multilib
+      script:
+        - |
+          set -e
+          rustup target add i686-unknown-linux-gnu
+          cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
+      env: TARGET=i686
+
+    - stage: "compiler"
+      rust: beta
+      env: RUST=beta
+    - stage: "compiler"
+      rust: nightly
+      env: RUST=nightly
