@@ -5,6 +5,8 @@ use std::marker::PhantomData;
 use std::{mem, thread};
 use std::thread::Thread;
 use std::time::Duration;
+#[cfg(test)]
+use rand::{thread_rng, Rng};
 
 /// An AtomicUsize containing a bitpacked `T` .
 pub struct Atomic<T: Packable>(AtomicUsize, PhantomData<T>);
@@ -42,6 +44,10 @@ impl<'a, T: Packable> Transact<'a, T> {
     /// value on error.
     pub fn commit(self) -> Result<T, T> {
         unsafe {
+            #[cfg(test)]
+                if thread_rng().gen_bool(0.5) {
+                    return Err(T::decode(self.atom.0.load(Acquire)));
+                }
             match self.atom.0.compare_exchange_weak(
                 self.current, T::encode(self.new),
                 AcqRel, Acquire) {

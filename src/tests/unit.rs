@@ -108,14 +108,14 @@ fn test_zero_now() {
 #[test]
 fn test_zero_pending() {
     let semaphore = Semaphore::new(0);
-    println!("{:?}", semaphore);
+    println!("A {:?}", semaphore);
     let mut a1 = TestFuture::new(&semaphore, 1);
-    println!("{:?}", semaphore);
+    println!("B {:?}", semaphore);
     assert!(a1.poll().is_none());
-    println!("{:?}", semaphore);
+    println!("C {:?}", semaphore);
     let mut a2 = TestFuture::new(&semaphore, 0);
     let g2 = a2.poll();
-    println!("{:?}", g2);
+    println!("D {:?}", g2);
     assert!(a2.poll().is_none());
     assert_eq!(a1.count(), 0);
     assert_eq!(a2.count(), 0);

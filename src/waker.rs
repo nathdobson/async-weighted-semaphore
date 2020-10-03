@@ -12,6 +12,7 @@ use std::{mem, thread, fmt};
 use std::ops::Deref;
 use std::thread::Thread;
 use std::fmt::{Debug, Formatter};
+use std::ptr::null;
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 #[repr(align(8))]
@@ -189,7 +190,10 @@ impl AtomicWaker {
                 Cancelling => {
                     *state = Cancelled;
                     let thread = (*(*this).thread.get()).take().unwrap();
-                    state.commit()?;
+                    if let Err(e) = state.commit() {
+                        *(*this).thread.get() = Some(thread);
+                        return Err(e);
+                    }
                     thread.unpark();
                 }
                 _ => unreachable!("{:?}", *state)
@@ -198,12 +202,20 @@ impl AtomicWaker {
     }
 }
 
+unsafe fn debug_waker(waker: *const Option<Waker>) -> *const () {
+    if let Some(waker) = (*waker).as_ref() {
+        mem::transmute::<_, &(*const (), *const ())>(waker).0
+    } else {
+        null()
+    }
+}
+
 impl Debug for AtomicWaker {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("AW")
             .field("s", &self.state.load(SeqCst))
-            .field("w0", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&*self.wakers[0].get()) }.0))
-            .field("w1", &(unsafe { mem::transmute::<_, &(*mut (), *mut ())>(&*self.wakers[1].get()) }.0))
+            .field("w0", unsafe { &debug_waker(&*self.wakers[0].get()) })
+            .field("w1", unsafe { &debug_waker(&*self.wakers[1].get()) })
             .field("t", unsafe { &*self.thread.get() })
             .finish()
     }
