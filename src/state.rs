@@ -1,4 +1,4 @@
-use crate::atomic::{Packable, Atomic};
+use crate::atomic::{Packable};
 use crate::state::AcquireState::{Available, Queued};
 use crate::state::ReleaseState::{LockedDirty, Locked, Unlocked};
 use std::ops::{AddAssign, Add, Sub, SubAssign};
@@ -7,10 +7,10 @@ use std::fmt;
 use std::ptr::null;
 use std::cell::UnsafeCell;
 use crate::Semaphore;
-use std::task::Waker;
+
 use crate::waker::AtomicWaker;
-use std::thread::Thread;
-use std::sync::atomic::Ordering::SeqCst;
+
+
 
 // A number of available permits, or a "poisoned flag" if greater than Semaphore::MAX_AVAILABLE.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]

@@ -1,11 +1,11 @@
 use std::cell::UnsafeCell;
 use std::task::{Waker, Poll, Context, RawWakerVTable};
-use std::sync::atomic::AtomicUsize;
+
 use std::sync::atomic::Ordering::{Acquire, SeqCst, Relaxed};
 use crate::waker::State::{Cancelled, Cancelling};
 use crate::atomic::{Atomic, Packable};
 use std::{mem, thread, fmt};
-use std::ops::Deref;
+
 use std::thread::Thread;
 use std::fmt::{Debug, Formatter};
 use std::ptr::null;
@@ -222,14 +222,14 @@ mod test {
     use std::future::Future;
     use futures::task::{Context, Poll};
     use std::pin::Pin;
-    use std::ptr::null;
+    
     use futures::pin_mut;
     use futures::poll;
-    use futures::join;
-    use std::cell::UnsafeCell;
-    use std::sync::mpsc::channel;
-    use std::sync::{Barrier, Arc};
-    use async_std::task::spawn;
+    
+    
+    
+    
+    
     use futures::executor::block_on;
     use std::thread;
     use futures_test::std_reexport::sync::mpsc::sync_channel;

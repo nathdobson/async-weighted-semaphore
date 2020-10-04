@@ -1,10 +1,10 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{Ordering, AtomicUsize};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::marker::PhantomData;
-use std::{mem, thread};
-use std::thread::Thread;
-use std::time::Duration;
+use std::{mem};
+
+
 
 /// An AtomicUsize containing a bitpacked `T` .
 pub struct Atomic<T: Packable>(AtomicUsize, PhantomData<T>);

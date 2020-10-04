@@ -1,10 +1,10 @@
-use crate::{Semaphore, AcquireError, SemaphoreGuard, TryAcquireError};
+use crate::{Semaphore, AcquireError, SemaphoreGuard};
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::thread;
 use std::sync::Arc;
 use futures::executor::block_on;
-use std::time::Duration;
+
 
 #[derive(Debug)]
 pub struct RwLock<T: ?Sized> {

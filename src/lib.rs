@@ -4,7 +4,7 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::{fmt, mem, thread};
+use std::{fmt, mem};
 use std::cell::UnsafeCell;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
@@ -16,7 +16,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::ptr::null;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::{AcqRel, Relaxed, SeqCst};
+use std::sync::atomic::Ordering::{AcqRel, Relaxed};
 use std::task::{Context, Poll};
 
 use crate::atomic::Atomic;

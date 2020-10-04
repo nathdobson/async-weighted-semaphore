@@ -1,13 +1,13 @@
-use crate::{Semaphore, AcquireFutureArc, AcquireError};
+use crate::{Semaphore, AcquireError};
 use std::sync::Arc;
 use futures_test::std_reexport::collections::VecDeque;
 use async_std::sync::Mutex;
-use std::io::{Cursor, BufReader, BufRead};
+use std::io::{BufReader, BufRead};
 use std::{mem, thread};
 use futures::executor::block_on;
 use rand::{thread_rng, Rng};
-use futures_test::futures_core_reexport::core_reexport::time::Duration;
-use async_std::task::sleep;
+
+
 
 #[derive(Clone)]
 struct Pipe {
@@ -90,7 +90,7 @@ impl Drop for WriterInner {
 
 #[test]
 fn test_pipe() {
-    for i in 0..100 {
+    for _i in 0..100 {
         test_pipe_impl();
     }
 }
