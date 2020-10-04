@@ -4,6 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::thread;
 use std::sync::Arc;
 use futures::executor::block_on;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct RwLock<T: ?Sized> {
@@ -81,7 +82,7 @@ impl<'a, T: ?Sized> DerefMut for RwLockWriteGuard<'a, T> {
 fn test() {
     let lock = Arc::new(RwLock::new(Vec::new()));
     let threads = 10;
-    let iters = 1000;
+    let iters = 500;
     (0..threads).map(|thread| {
         let lock = lock.clone();
         thread::spawn(move || {

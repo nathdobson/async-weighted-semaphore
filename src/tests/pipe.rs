@@ -6,6 +6,7 @@ use std::io::{Cursor, BufReader, BufRead};
 use std::{mem, thread};
 use futures::executor::block_on;
 use rand::{thread_rng, Rng};
+use futures_test::futures_core_reexport::core_reexport::time::Duration;
 
 #[derive(Clone)]
 struct Pipe {

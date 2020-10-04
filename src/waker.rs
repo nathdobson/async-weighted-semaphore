@@ -1,38 +1,39 @@
 use std::cell::UnsafeCell;
-use std::task::{Waker, Poll, Context};
-use std::sync::atomic::Ordering::{Acquire, SeqCst};
-use crate::waker::Flag::{Finished, Cancelled, Cancelling};
-use crate::waker::Flag::ReadyEmpty;
-use crate::waker::Flag::StoringEmpty;
-use crate::waker::Flag::LoadingEmpty;
-use crate::waker::Flag::LoadingStoring;
-use crate::waker::Flag::LoadingReady;
+use std::task::{Waker, Poll, Context, RawWakerVTable};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::{Acquire, SeqCst, Relaxed};
+use crate::waker::State::{Cancelled, Cancelling};
 use crate::atomic::{Atomic, Packable};
 use std::{mem, thread, fmt};
 use std::ops::Deref;
 use std::thread::Thread;
 use std::fmt::{Debug, Formatter};
 use std::ptr::null;
+use crate::waker::State::{Pending, Storing, Finished, Loading};
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
-#[repr(align(8))]
-enum Flag {
-    ReadyEmpty { front: u8 },
-    StoringEmpty { front: u8 },
-    LoadingEmpty { front: u8 },
-    LoadingStoring { front: u8 },
-    LoadingReady { front: u8 },
+enum State {
+    // There is a valid waker
+    Pending,
+    // A poll is in progress, storing a new waker.
+    Storing,
+    // A finish is in progress, loading the waker.
+    Loading,
+    // A finish has succeeded, and will call wake if necessary.
     Finished { poisoned: bool },
+    // start_cancel has been called.
     Cancelling,
+    // accept_cancel has been called.
     Cancelled,
 }
 
 // A primitive for synchronizing the polling or cancellation of a Future with another thread
-// that marks the future as finished. Encodes a channel containing up to two Wakers. One waker
-// would require a spinlock if a poll occurs while a finish is reading the waker.
+// that marks the future as finished.
 pub struct AtomicWaker {
-    state: Atomic<Flag>,
-    wakers: [UnsafeCell<Option<Waker>>; 2],
+    vtable: Atomic<*const RawWakerVTable>,
+    // Split the waker among two atomics. These only need to be atomic to prevent data races.
+    data: Atomic<*const ()>,
+    state: Atomic<State>,
     thread: UnsafeCell<Option<Thread>>,
 }
 
@@ -53,64 +54,61 @@ unsafe impl Send for AtomicWaker {}
 
 unsafe impl Sync for AtomicWaker {}
 
-impl Packable for Flag {
+impl Packable for State {
     unsafe fn encode(val: Self) -> usize {
-        mem::transmute::<_, u64>(val) as usize
+        mem::transmute::<_, u8>(val) as usize
     }
 
     unsafe fn decode(val: usize) -> Self {
-        mem::transmute(val as u64)
+        mem::transmute(val as u8)
     }
 }
 
 impl AtomicWaker {
     pub unsafe fn new() -> Self {
         AtomicWaker {
-            state: Atomic::new(ReadyEmpty { front: 0 }),
+            state: Atomic::new(Pending),
+            vtable: Atomic::new(null()),
+            data: Atomic::new(null()),
             thread: UnsafeCell::new(None),
-            wakers: [UnsafeCell::new(None), UnsafeCell::new(None)],
         }
     }
 
     // Poll until the future is finished.
     #[must_use]
     pub unsafe fn poll(&self, context: &mut Context) -> Poll<bool> {
-        if let Poll::Ready(poisoned) = self.state.transact(|mut state| {
-            Ok(match *state {
-                ReadyEmpty { front } => {
-                    *state = StoringEmpty { front };
-                    state.commit()?;
-                    *self.wakers[front as usize].get() = Some(context.waker().clone());
-                    Poll::Pending
-                }
-                LoadingEmpty { front } | LoadingReady { front } => {
-                    *state = LoadingStoring { front };
-                    state.commit()?;
-                    *self.wakers[1 - front as usize].get() = Some(context.waker().clone());
-                    Poll::Pending
-                }
-                Finished { poisoned } => Poll::Ready(poisoned),
-                _ => unreachable!("{:?}", *state)
-            })
-        }) {
-            return Poll::Ready(poisoned);
-        }
+        let mut waker = Some(context.waker().clone());
         self.state.transact(|mut state| {
             Ok(match *state {
-                StoringEmpty { front } => {
-                    *state = ReadyEmpty { front };
+                Pending | Loading => {
+                    *state = Storing;
                     state.commit()?;
-                    Poll::Pending
+                    let (data, vtable) =
+                        mem::transmute_copy::<_, (*const (), *const RawWakerVTable)>(waker.as_ref().unwrap());
+                    let old_data = self.data.load(Relaxed);
+                    let old_vtable = self.vtable.load(Relaxed);
+                    self.data.store(data, Relaxed);
+                    self.vtable.store(vtable, Relaxed);
+                    if old_vtable != null() {
+                        mem::drop(mem::transmute::<_, Waker>((old_data, old_vtable)));
+                    }
+                    self.state.transact(|mut state| {
+                        Ok(match *state {
+                            Storing => {
+                                *state = Pending;
+                                state.commit()?;
+                                mem::forget(waker.take());
+                                Poll::Pending
+                            }
+                            Finished { poisoned } => {
+                                Poll::Ready(poisoned)
+                            }
+                            _ => unreachable!()
+                        })
+                    })
                 }
-                LoadingStoring { front } => {
-                    *state = LoadingReady { front };
-                    state.commit()?;
-                    Poll::Pending
-                }
-                Finished { poisoned } => {
-                    Poll::Ready(poisoned)
-                }
-                _ => unreachable!("{:?}", *state)
+                Finished { poisoned } => Poll::Ready(poisoned),
+                _ => unreachable!()
             })
         })
     }
@@ -119,26 +117,26 @@ impl AtomicWaker {
     pub unsafe fn finish(this: *const Self, poisoned: bool) -> FinishResult {
         (*this).state.transact(|mut state| {
             Ok(match *state {
-                ReadyEmpty { front } => {
-                    *state = LoadingEmpty { front };
-                    let state = state.commit()?;
-                    (*(*this).wakers[front as usize].get()).take().unwrap().wake();
-                    Err(state)?
+                Pending => {
+                    *state = Loading;
+                    let new = state.commit()?;
+                    Err(new)?
                 }
-                StoringEmpty { .. } | LoadingEmpty { .. } | LoadingStoring { .. } => {
+                Loading => {
+                    let data = (*this).data.load(Relaxed);
+                    let vtable = (*this).vtable.load(Relaxed);
+                    *state = Finished { poisoned };
+                    state.commit()?;
+                    let waker = mem::transmute::<_, Waker>((data, vtable));
+                    waker.wake();
+                    FinishResult::Finished { poisoned }
+                }
+                Storing => {
                     *state = Finished { poisoned };
                     state.commit()?;
                     FinishResult::Finished { poisoned }
                 }
-                LoadingReady { front } => {
-                    *state = LoadingEmpty { front: 1 - front };
-                    let state = state.commit()?;
-                    (*(*this).wakers[1 - front as usize].get()).take().unwrap().wake();
-                    Err(state)?
-                }
-                Cancelling => {
-                    FinishResult::Cancelling
-                }
+                Cancelling => FinishResult::Cancelling,
                 _ => unreachable!()
             })
         })
@@ -149,9 +147,7 @@ impl AtomicWaker {
         *self.thread.get() = Some(thread::current());
         self.state.transact(|mut state| {
             Ok(match *state {
-                ReadyEmpty { .. }
-                | LoadingEmpty { .. }
-                | LoadingReady { .. } => {
+                Pending | Loading => {
                     *state = Cancelling;
                     state.commit()?;
                     CancelResult::Cancelling
@@ -192,11 +188,19 @@ impl AtomicWaker {
     }
 }
 
-unsafe fn debug_waker(waker: *const Option<Waker>) -> *const () {
-    if let Some(waker) = (*waker).as_ref() {
-        mem::transmute::<_, &(*const (), *const ())>(waker).0
-    } else {
-        null()
+impl Drop for AtomicWaker {
+    fn drop(&mut self) {
+        match self.state.load(Relaxed) {
+            Pending | Cancelled => unsafe {
+                let data = self.data.load(Relaxed);
+                let vtable = self.vtable.load(Relaxed);
+                if vtable != null() {
+                    mem::drop(mem::transmute::<_, Waker>((data, vtable)));
+                }
+            }
+            Finished { .. } => {}
+            _ => unreachable!()
+        }
     }
 }
 
@@ -204,8 +208,8 @@ impl Debug for AtomicWaker {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("AW")
             .field("s", &self.state.load(SeqCst))
-            .field("w0", unsafe { &debug_waker(&*self.wakers[0].get()) })
-            .field("w1", unsafe { &debug_waker(&*self.wakers[1].get()) })
+            .field("d", &self.data.load(SeqCst))
+            .field("t", &self.vtable.load(SeqCst))
             .field("t", unsafe { &*self.thread.get() })
             .finish()
     }
@@ -297,7 +301,6 @@ mod test {
             }
         });
     }
-
 
     #[test]
     fn test_cancel_finish() {

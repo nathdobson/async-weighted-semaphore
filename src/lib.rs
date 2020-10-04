@@ -280,8 +280,8 @@ impl<'a> Drop for AcquireFuture<'a> {
                         }
                     }
                 }
-                AcquireStep::Entering { .. } => {}
-                AcquireStep::Done => {}
+                AcquireStep::Entering { .. } => {  },
+                AcquireStep::Done => {},
             }
         }
     }

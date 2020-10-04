@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{Ordering, AtomicUsize};
-use std::sync::atomic::Ordering::{AcqRel, Acquire};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 use std::marker::PhantomData;
 use std::{mem, thread};
 use std::thread::Thread;
@@ -58,6 +58,9 @@ impl<T: Packable> Atomic<T> {
     }
     pub fn load(&self, order: Ordering) -> T {
         unsafe { T::decode(self.0.load(order)) }
+    }
+    pub fn store(&self, val: T, order: Ordering) {
+        unsafe { self.0.store(T::encode(val), order); }
     }
     pub fn swap(&self, val: T, order: Ordering) -> T {
         unsafe { T::decode(self.0.swap(T::encode(val), order)) }
