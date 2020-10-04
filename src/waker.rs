@@ -13,7 +13,6 @@ use crate::waker::State::{Pending, Storing, Finished, Loading};
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 enum State {
-    // There is a valid waker
     Pending,
     // A poll is in progress, storing a new waker.
     Storing,

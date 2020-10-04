@@ -90,14 +90,14 @@ impl Drop for WriterInner {
 
 #[test]
 fn test_pipe() {
-    for i in 0..1000 {
+    for i in 0..100 {
         test_pipe_impl();
     }
 }
 
 fn test_pipe_impl() {
     let threads = 10;
-    let iters = 100;
+    let iters = 1000;
     let (w, r) = pipe(20);
     for _ in 0..threads {
         let w = w.clone();

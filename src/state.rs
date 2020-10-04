@@ -12,6 +12,7 @@ use crate::waker::AtomicWaker;
 use std::thread::Thread;
 use std::sync::atomic::Ordering::SeqCst;
 
+// A number of available permits, or a "poisoned flag" if greater than Semaphore::MAX_AVAILABLE.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Permits(pub(self) usize);
 
@@ -24,7 +25,7 @@ pub enum ReleaseState {
     // the number of available permits.
     Locked,
     // Indicates there is at least one release in progress, and a release completed without holding
-    // the lock, deferring a number of permits for the release lock owner.
+    // the lock. Contains a number of permits for the release lock owner to release.
     LockedDirty(Permits),
 }
 
@@ -32,7 +33,7 @@ pub enum ReleaseState {
 pub(crate) enum AcquireState {
     // Indicates that there may be pending acquires and contains a pointer to the back of the queue.
     Queued(*const Waiter),
-    // Indicates that there are not pending acquires and contains the available permits.
+    // Indicates that there are no pending acquires and contains the available permits.
     Available(Permits),
 }
 
@@ -46,14 +47,16 @@ pub enum AcquireStep {
     Done,
 }
 
+// The state of a single future.
 // Alignment required for AcquireState bitpacking.
 #[repr(align(2))]
 pub struct Waiter {
     pub semaphore: *const Semaphore,
     // The requested number of permits
     pub amount: usize,
+    // How far this future has progressed.
     pub step: UnsafeCell<AcquireStep>,
-    // Stores a Waker and synchronizes finishing, cancelling, and polling
+    // Stores a Waker and synchronizes finishing and cancelling with polling
     pub waker: AtomicWaker,
     // The later node in the acquire queue
     pub next: UnsafeCell<*const Waiter>,
@@ -174,7 +177,6 @@ impl Debug for Waiter {
             .finish()
     }
 }
-
 
 impl Add for Permits {
     type Output = Self;
