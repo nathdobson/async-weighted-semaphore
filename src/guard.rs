@@ -5,7 +5,6 @@ use std::thread::panicking;
 
 /// A guard returned by [`Semaphore::acquire`] that will call [`Semaphore::release`] when it
 /// is dropped (falls out of scope).
-#[derive(Debug)]
 #[must_use]
 pub struct SemaphoreGuard<'a> {
     semaphore: &'a Semaphore,
@@ -15,7 +14,6 @@ pub struct SemaphoreGuard<'a> {
 
 /// A guard returned by [`Semaphore::acquire_arc`] that will call [`Semaphore::release`] when it
 /// is dropped (falls out of scope). Can be sent between threads.
-#[derive(Debug)]
 #[must_use]
 pub struct SemaphoreGuardArc {
     semaphore: Option<Arc<Semaphore>>,

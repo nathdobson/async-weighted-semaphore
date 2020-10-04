@@ -12,8 +12,6 @@ mod tests;
 #[macro_use]
 extern crate lazy_static;
 
-
-use crate::state::{DebugPtr, Waiter};
 use std::fmt::Display;
 use std::error::Error;
 use std::future::Future;
@@ -30,7 +28,7 @@ use crate::atomic::{Atomic};
 use std::sync::Arc;
 pub use crate::guard::SemaphoreGuard;
 pub use crate::guard::SemaphoreGuardArc;
-use crate::state::{AcquireState, ReleaseState, Permits};
+use crate::state::{AcquireState, ReleaseState, Permits, Waiter};
 use std::mem::size_of;
 use std::panic::{UnwindSafe, RefUnwindSafe};
 use std::marker::PhantomData;
@@ -106,11 +104,21 @@ impl Display for TryAcquireError {
 /// `Semaphore` uses no heap allocations. Most calls are lock-free. The only action that may wait for a
 /// lock is cancelling an `AcquireFuture`. In other words, if an `AcquireFuture` is dropped before
 /// `AcquireFuture::poll` returns `Poll::Ready`, the drop may synchronously wait for a lock.
+// This implementation encodes state (the available counter, acquire queue, and cancel queue) into
+// multiple atomic variables and linked lists. Concurrent acquires (and concurrent cancels) synchronize
+// by pushing onto a stack with an atomic swap. Releases synchronize with other operations by attempting
+// to acquire a lock. If the lock is successfully acquired, the release can proceed. Otherwise
+// the lock is marked dirty to indicate that there is additional work for the lock owner to do.
 pub struct Semaphore {
+    // The number of available permits or the back of the queue (without next edges).
     acquire: Atomic<AcquireState>,
+    // A number of releasable permits, and the state of the current release lock.
     release: Atomic<ReleaseState>,
+    // The front of the queue (with next edges).
     front: UnsafeCell<*const Waiter>,
+    // The last node swapped from AcquireState (with next edges).
     middle: UnsafeCell<*const Waiter>,
+    // A stack of nodes that are cancelling.
     next_cancel: Atomic<*const Waiter>,
 }
 
@@ -137,21 +145,20 @@ unsafe impl<'a> Send for AcquireFuture<'a> {}
 
 impl<'a> Debug for AcquireFuture<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", unsafe { &*self.0.get() })
+        f.debug_tuple("AcquireFuture").field(&unsafe { self.waiter() }.amount).finish()
     }
 }
 
 impl Debug for Semaphore {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        unsafe {
-            let mut w = f.debug_struct("Semaphore");
-            w.field("acquire", &self.acquire.load(SeqCst));
-            w.field("release", &self.release.load(SeqCst));
-            w.field("front", &DebugPtr(*self.front.get()));
-            w.field("middle", &DebugPtr(*self.middle.get()));
-            w.finish()?;
-            Ok(())
-        }
+        match self.acquire.load(Relaxed) {
+            Available(available) => write!(f, "Semaphore::Ready({:?})", available)?,
+            Queued(_) => match self.release.load(Relaxed) {
+                Unlocked(available) => write!(f, "Semaphore::Blocked({:?})", available)?,
+                _ => write!(f, "Semaphore::Unknown")?,
+            },
+        };
+        Ok(())
     }
 }
 
@@ -159,6 +166,7 @@ impl<'a> AcquireFuture<'a> {
     unsafe fn waiter(&self) -> &Waiter {
         &*self.0.get()
     }
+    // Try to acquire or add to queue.
     unsafe fn poll_enter(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
         (*self.waiter().semaphore).acquire.transact(|mut acquire| {
             let (available, back) = match *acquire {
@@ -187,16 +195,16 @@ impl<'a> AcquireFuture<'a> {
             *acquire = Queued(self.0.get());
             acquire.commit()?;
             *self.waiter().step.get() = AcquireStep::Waiting;
-            // Even if available==0, this is necessary to mark the dirty bit.
+            // Even if available==0, this is necessary to set release to LockedDirty.
             (*self.waiter().semaphore).release(available);
             Ok(Poll::Pending)
         })
     }
+
     unsafe fn poll_waiting(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<SemaphoreGuard<'a>, AcquireError>> {
         match self.waiter().waker.poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(poisoned) => {
-                //println!("Ready {:?}", self.0.get());
                 *self.waiter().step.get() = AcquireStep::Done;
                 if poisoned {
                     Poll::Ready(Err(AcquireError))
@@ -248,19 +256,24 @@ impl<'a> Drop for AcquireFuture<'a> {
         unsafe {
             match *self.waiter().step.get() {
                 AcquireStep::Waiting => {
-                    //println!("Cancelling {:?}", self.0.get());
+                    // Decide whether the finish or cancel wins if there is a race.
                     match self.waiter().waker.start_cancel() {
                         CancelResult::Cancelling => {
+                            // Push onto the cancel queue.
                             (*self.waiter().semaphore).next_cancel.transact(|mut next_cancel| {
                                 *self.waiter().next_cancel.get() = *next_cancel;
                                 *next_cancel = self.0.get();
                                 next_cancel.commit()?;
                                 Ok(())
                             });
+                            // Ensure a flush of the cancel queue is completed or at least scheduled.
                             (*self.waiter().semaphore).release(0);
+                            // Wait for a notification that the node can be dropped
                             self.waiter().waker.wait_cancel();
                         }
                         CancelResult::Finished { poisoned } => {
+                            // The acquire finished before it could be cancelled. Pretend like
+                            // nothing happened and release the acquired permits.
                             if !poisoned {
                                 (*self.waiter().semaphore).release(self.waiter().amount);
                             }
@@ -270,7 +283,6 @@ impl<'a> Drop for AcquireFuture<'a> {
                 AcquireStep::Entering { .. } => {}
                 AcquireStep::Done => {}
             }
-            //println!("Dropping {:?} {:?}", self.0.get(), *self.waiter().step.get());
         }
     }
 }
@@ -282,6 +294,8 @@ struct ReleaseAction<'a> {
 }
 
 impl<'a> ReleaseAction<'a> {
+    // Attempt to acquire the release lock. If it is locked, defer the release for the lock owner
+    // by including the new permits in ReleaseState.
     pub unsafe fn lock_or_else_defer(&mut self) -> bool {
         self.sem.release.transact(|mut release| {
             Ok(match *release {
@@ -304,7 +318,8 @@ impl<'a> ReleaseAction<'a> {
             })
         })
     }
-
+    // If the queue is empty, make the permits available in AcquireState. Otherwise take all nodes
+    // in AcquireState and add next edges.
     unsafe fn flip(&mut self) {
         self.sem.acquire.transact(|mut acquire| {
             Ok(match *acquire {
@@ -347,6 +362,7 @@ impl<'a> ReleaseAction<'a> {
         })
     }
 
+    // Clear the cancellation queue, removing nodes from the finish queue. Nodes should have next edges.
     unsafe fn cancel(&mut self, mut next_cancel: *const Waiter) {
         while next_cancel != null() {
             let next = *(*next_cancel).next.get();
@@ -367,50 +383,37 @@ impl<'a> ReleaseAction<'a> {
         }
     }
 
+    // Try to finish and pop the next node.
     unsafe fn try_pop(&mut self) -> bool {
         let front = *self.sem.front.get();
+        let amount = (*front).amount;
+        let next = *(*front).next.get();
         if let Some(releasable) = self.releasable.into_usize() {
-            if (*front).amount <= releasable {
-                let amount = (*front).amount;
-                let next = *(*front).next.get();
-                //println!("Finishing {:?}", front);
-                match AtomicWaker::finish(&(*front).waker, false) {
-                    FinishResult::Cancelling => {
-                        return false;
-                    }
-                    FinishResult::Finished { .. } => {
-                        self.releasable = Permits::new(releasable - amount);
-                        *self.sem.front.get() = next;
-                        if next == null() {
-                            *self.sem.middle.get() = null();
-                        } else {
-                            *(*next).prev.get() = null();
-                        }
-                        return true;
-                    }
-                }
-            }
-        } else {
-            let next = *(*front).next.get();
-            //println!("Poisoning {:?}", front);
-            match AtomicWaker::finish(&(*front).waker, true) {
-                FinishResult::Cancelling => {
-                    return false;
-                }
-                FinishResult::Finished { .. } => {
-                    *self.sem.front.get() = next;
-                    if next == null() {
-                        *self.sem.middle.get() = null();
-                    } else {
-                        *(*next).prev.get() = null();
-                    }
-                    return true;
-                }
+            if releasable < (*front).amount {
+                return false;
             }
         }
-        false
+        // Determine if the node was cancelled before it could be finished.
+        match AtomicWaker::finish(&(*front).waker, false) {
+            FinishResult::Cancelling =>
+                return false,
+            FinishResult::Finished { .. } => {
+                if let Some(releasable) = self.releasable.into_usize() {
+                    self.releasable = Permits::new(releasable - amount);
+                }
+                *self.sem.front.get() = next;
+                if next == null() {
+                    *self.sem.middle.get() = null();
+                } else {
+                    *(*next).prev.get() = null();
+                }
+                return true;
+            }
+        }
     }
 
+    // Attempt to unlock the release lock. If there were concurrent releases or cancels, keep the
+    // lock in order to complete those operations.
     unsafe fn try_unlock(&mut self) -> bool {
         self.sem.release.transact(|mut release| {
             Ok(match *release {
@@ -430,25 +433,21 @@ impl<'a> ReleaseAction<'a> {
         })
     }
 
+    // Perform a release operation
     unsafe fn release(&mut self) {
-        // Try to get a release lock. If it's already locked, defer these permits to the other
-        // releaser.
         if !self.lock_or_else_defer() {
             return;
         }
         loop {
-            //println!("");
-            //println!("A {:?}",self.sem);
+            // Take the cancel stack first to ensure all cancelled nodes have next edges.
             let next_cancel = self.sem.next_cancel.swap(null(), AcqRel);
-            //println!("B {:?}",self.sem);
+            // Add next edges
             self.flip();
-            //println!("C {:?}",self.sem);
+            // Clear the cancellation queue.
             self.cancel(next_cancel);
-            //println!("D {:?}",self.sem);
+            // Finish nodes until stuck.
             while *self.sem.front.get() != null() && self.try_pop() {}
-            //println!("E {:?}",self.sem);
-            // Attempt to lose the release lock. If there are additional releasable permits, take
-            // those instead of unlocking.
+            // Unlock if there were no concurrent operations.
             if self.try_unlock() {
                 return;
             }

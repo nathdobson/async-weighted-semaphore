@@ -24,7 +24,7 @@ pub enum ReleaseState {
     // the number of available permits.
     Locked,
     // Indicates there is at least one release in progress, and a release completed without holding
-    // the lock, defering a number of permits for the release lock owner.
+    // the lock, deferring a number of permits for the release lock owner.
     LockedDirty(Permits),
 }
 
@@ -38,18 +38,28 @@ pub(crate) enum AcquireState {
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub enum AcquireStep {
+    // The future was just created
     Entering,
+    // The future has registered a waker.
     Waiting,
+    // The future is has returned Ready or is being cancelled.
     Done,
 }
 
+// Alignment required for AcquireState bitpacking.
+#[repr(align(2))]
 pub struct Waiter {
     pub semaphore: *const Semaphore,
+    // The requested number of permits
     pub amount: usize,
     pub step: UnsafeCell<AcquireStep>,
+    // Stores a Waker and synchronizes finishing, cancelling, and polling
     pub waker: AtomicWaker,
+    // The later node in the acquire queue
     pub next: UnsafeCell<*const Waiter>,
+    // The earlier node in the acquire queue
     pub prev: UnsafeCell<*const Waiter>,
+    // The next node in the cancellation stack
     pub next_cancel: UnsafeCell<*const Waiter>,
 }
 

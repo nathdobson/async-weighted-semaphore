@@ -27,6 +27,9 @@ enum Flag {
     Cancelled,
 }
 
+// A primitive for synchronizing the polling or cancellation of a Future with another thread
+// that marks the future as finished. Encodes a channel containing up to two Wakers. One waker
+// would require a spinlock if a poll occurs while a finish is reading the waker.
 pub struct AtomicWaker {
     state: Atomic<Flag>,
     wakers: [UnsafeCell<Option<Waker>>; 2],
@@ -68,19 +71,6 @@ impl AtomicWaker {
             wakers: [UnsafeCell::new(None), UnsafeCell::new(None)],
         }
     }
-
-    // self.state.transact(|mut state| {
-    //     Ok(match *state {
-    //         ReadyEmpty { front } => {},
-    //         StoringEmpty { front } => {},
-    //         LoadingEmpty { front } => {},
-    //         LoadingStoring { front } => {},
-    //         LoadingReady { front } => {},
-    //         Finished { poisoned } => {},
-    //         Cancelling => {},
-    //         Cancelled => {},
-    //     })
-    // })
 
     // Poll until the future is finished.
     #[must_use]

@@ -12,12 +12,12 @@ pub struct RwLock<T: ?Sized> {
 }
 
 pub struct RwLockReadGuard<'a, T: ?Sized> {
-    guard: SemaphoreGuard<'a>,
+    _guard: SemaphoreGuard<'a>,
     value: *const T,
 }
 
 pub struct RwLockWriteGuard<'a, T: ?Sized> {
-    guard: SemaphoreGuard<'a>,
+    _guard: SemaphoreGuard<'a>,
     value: *mut T,
 }
 
@@ -29,10 +29,10 @@ impl<T: ?Sized> RwLock<T> {
         }
     }
     async fn read(&self) -> Result<RwLockReadGuard<'_, T>, AcquireError> {
-        Ok(RwLockReadGuard { guard: self.semaphore.acquire(1).await?, value: self.inner.get() })
+        Ok(RwLockReadGuard { _guard: self.semaphore.acquire(1).await?, value: self.inner.get() })
     }
     async fn write(&self) -> Result<RwLockWriteGuard<'_, T>, AcquireError> {
-        Ok(RwLockWriteGuard { guard: self.semaphore.acquire(Semaphore::MAX_AVAILABLE).await?, value: self.inner.get() })
+        Ok(RwLockWriteGuard { _guard: self.semaphore.acquire(Semaphore::MAX_AVAILABLE).await?, value: self.inner.get() })
     }
     fn into_inner(self) -> Result<T, AcquireError> where T: Sized {
         match self.semaphore.try_acquire(0) {

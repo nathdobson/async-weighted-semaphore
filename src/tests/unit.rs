@@ -114,8 +114,7 @@ fn test_zero_pending() {
     assert!(a1.poll().is_none());
     println!("C {:?}", semaphore);
     let mut a2 = TestFuture::new(&semaphore, 0);
-    let g2 = a2.poll();
-    println!("D {:?}", g2);
+    let _g2 = a2.poll();
     assert!(a2.poll().is_none());
     assert_eq!(a1.count(), 0);
     assert_eq!(a2.count(), 0);
