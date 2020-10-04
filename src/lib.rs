@@ -1,5 +1,32 @@
 //! An asynchronous weighted [`Semaphore`].
-#![allow(unused_imports)]
+
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
+
+use std::{fmt, mem, thread};
+use std::cell::UnsafeCell;
+use std::error::Error;
+use std::fmt::{Debug, Formatter};
+use std::fmt::Display;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::mem::size_of;
+use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::pin::Pin;
+use std::ptr::null;
+use std::sync::Arc;
+use std::sync::atomic::Ordering::{AcqRel, Relaxed, SeqCst};
+use std::task::{Context, Poll};
+
+use crate::atomic::Atomic;
+pub use crate::guard::SemaphoreGuard;
+pub use crate::guard::SemaphoreGuardArc;
+use crate::state::{AcquireState, Permits, ReleaseState, Waiter};
+use crate::state::AcquireState::{Available, Queued};
+use crate::state::AcquireStep;
+use crate::state::ReleaseState::{Locked, LockedDirty, Unlocked};
+use crate::waker::{AtomicWaker, WakerResult};
 
 mod atomic;
 mod waker;
@@ -7,33 +34,6 @@ mod guard;
 mod state;
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-#[macro_use]
-extern crate lazy_static;
-
-use std::fmt::Display;
-use std::error::Error;
-use std::future::Future;
-use std::task::{Poll, Context};
-use std::pin::Pin;
-use std::{fmt, mem, thread};
-use std::cell::UnsafeCell;
-use std::ptr::{null};
-use std::fmt::{Debug, Formatter};
-use std::sync::atomic::Ordering::{Relaxed, SeqCst, AcqRel};
-use crate::state::AcquireState::{Available, Queued};
-use crate::state::ReleaseState::{Locked, Unlocked, LockedDirty};
-use crate::atomic::{Atomic};
-use std::sync::Arc;
-pub use crate::guard::SemaphoreGuard;
-pub use crate::guard::SemaphoreGuardArc;
-use crate::state::{AcquireState, ReleaseState, Permits, Waiter};
-use std::mem::size_of;
-use std::panic::{UnwindSafe, RefUnwindSafe};
-use std::marker::PhantomData;
-use crate::state::AcquireStep;
-use crate::waker::{AtomicWaker, WakerResult};
 
 /// An error returned by [`Semaphore::acquire`] to indicate the Semaphore has been poisoned.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone, Copy)]
