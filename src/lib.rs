@@ -33,7 +33,7 @@ use std::mem::size_of;
 use std::panic::{UnwindSafe, RefUnwindSafe};
 use std::marker::PhantomData;
 use crate::state::AcquireStep;
-use crate::waker::{AtomicWaker, CancelResult, FinishResult};
+use crate::waker::{AtomicWaker, WakerResult};
 
 /// An error returned by [`Semaphore::acquire`] to indicate the Semaphore has been poisoned.
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone, Copy)]
@@ -258,7 +258,7 @@ impl<'a> Drop for AcquireFuture<'a> {
                 AcquireStep::Waiting => {
                     // Decide whether the finish or cancel wins if there is a race.
                     match self.waiter().waker.start_cancel() {
-                        CancelResult::Cancelling => {
+                        WakerResult::Cancelling => {
                             // Push onto the cancel queue.
                             (*self.waiter().semaphore).next_cancel.transact(|mut next_cancel| {
                                 *self.waiter().next_cancel.get() = *next_cancel;
@@ -271,7 +271,7 @@ impl<'a> Drop for AcquireFuture<'a> {
                             // Wait for a notification that the node can be dropped
                             self.waiter().waker.wait_cancel();
                         }
-                        CancelResult::Finished { poisoned } => {
+                        WakerResult::Finished { poisoned } => {
                             // The acquire finished before it could be cancelled. Pretend like
                             // nothing happened and release the acquired permits.
                             if !poisoned {
@@ -280,8 +280,8 @@ impl<'a> Drop for AcquireFuture<'a> {
                         }
                     }
                 }
-                AcquireStep::Entering { .. } => {  },
-                AcquireStep::Done => {},
+                AcquireStep::Entering { .. } => {}
+                AcquireStep::Done => {}
             }
         }
     }
@@ -388,17 +388,17 @@ impl<'a> ReleaseAction<'a> {
         let front = *self.sem.front.get();
         let amount = (*front).amount;
         let next = *(*front).next.get();
-        if let Some(releasable) = self.releasable.into_usize() {
+        let releasable = self.releasable.into_usize();
+        if let Some(releasable) = releasable{
             if releasable < (*front).amount {
                 return false;
             }
         }
-        // Determine if the node was cancelled before it could be finished.
-        match AtomicWaker::finish(&(*front).waker, false) {
-            FinishResult::Cancelling =>
+        match AtomicWaker::finish(&(*front).waker, releasable.is_none()) {
+            WakerResult::Cancelling =>
                 return false,
-            FinishResult::Finished { .. } => {
-                if let Some(releasable) = self.releasable.into_usize() {
+            WakerResult::Finished { .. } => {
+                if let Some(releasable) = releasable {
                     self.releasable = Permits::new(releasable - amount);
                 }
                 *self.sem.front.get() = next;

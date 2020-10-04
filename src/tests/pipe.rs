@@ -7,6 +7,7 @@ use std::{mem, thread};
 use futures::executor::block_on;
 use rand::{thread_rng, Rng};
 use futures_test::futures_core_reexport::core_reexport::time::Duration;
+use async_std::task::sleep;
 
 #[derive(Clone)]
 struct Pipe {
@@ -45,6 +46,7 @@ impl Reader {
         let total = if let Ok(guard) = self.inner.0.ready.acquire(buf.len()).await {
             guard.forget();
             let mut lock = self.inner.0.buffer.lock().await;
+            assert!(buf.len() <= lock.len());
             for b in buf.iter_mut() {
                 *b = lock.pop_front().unwrap();
             }
@@ -88,8 +90,14 @@ impl Drop for WriterInner {
 
 #[test]
 fn test_pipe() {
+    for i in 0..1000 {
+        test_pipe_impl();
+    }
+}
+
+fn test_pipe_impl() {
     let threads = 10;
-    let iters = 1000;
+    let iters = 100;
     let (w, r) = pipe(20);
     for _ in 0..threads {
         let w = w.clone();

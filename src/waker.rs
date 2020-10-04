@@ -27,26 +27,25 @@ enum State {
     Cancelled,
 }
 
-// A primitive for synchronizing the polling or cancellation of a Future with another thread
-// that marks the future as finished.
+// A primitive for synchronizing between two threads:
+// Future: a thread that polls the a future and may decide to cancel (drop) it.
+// Producer: one that marks the future as finished or accepts cancellation.
 pub struct AtomicWaker {
     vtable: Atomic<*const RawWakerVTable>,
     // Split the waker among two atomics. These only need to be atomic to prevent data races.
     data: Atomic<*const ()>,
     state: Atomic<State>,
+    // The thread waiting for acceptance of cancellation
     thread: UnsafeCell<Option<Thread>>,
 }
 
-
+// The result of an attempt to finish or cancel.
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
-pub enum FinishResult {
+pub enum WakerResult {
+    // The future has been cancelled. The producer should accept_cancel.
+    // The future thread should wait_cancel.
     Cancelling,
-    Finished { poisoned: bool },
-}
-
-#[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
-pub enum CancelResult {
-    Cancelling,
+    // The future completed.
     Finished { poisoned: bool },
 }
 
@@ -74,7 +73,7 @@ impl AtomicWaker {
         }
     }
 
-    // Poll until the future is finished.
+    // Store a new waker and return the poisoned bit if finished.
     #[must_use]
     pub unsafe fn poll(&self, context: &mut Context) -> Poll<bool> {
         let mut waker = Some(context.waker().clone());
@@ -114,7 +113,7 @@ impl AtomicWaker {
     }
 
     // Signal that the future is finished.
-    pub unsafe fn finish(this: *const Self, poisoned: bool) -> FinishResult {
+    pub unsafe fn finish(this: *const Self, poisoned: bool) -> WakerResult {
         (*this).state.transact(|mut state| {
             Ok(match *state {
                 Pending => {
@@ -129,37 +128,39 @@ impl AtomicWaker {
                     state.commit()?;
                     let waker = mem::transmute::<_, Waker>((data, vtable));
                     waker.wake();
-                    FinishResult::Finished { poisoned }
+                    WakerResult::Finished { poisoned }
                 }
                 Storing => {
                     *state = Finished { poisoned };
                     state.commit()?;
-                    FinishResult::Finished { poisoned }
+                    WakerResult::Finished { poisoned }
                 }
-                Cancelling => FinishResult::Cancelling,
+                Cancelling => WakerResult::Cancelling,
                 _ => unreachable!()
             })
         })
     }
 
-    // Signal that the future has been dropped.
-    pub unsafe fn start_cancel(&self) -> CancelResult {
+    // Mark that the future is finished and wake the waker. The future may be cancelling, which
+    // makes this a no-op.
+    pub unsafe fn start_cancel(&self) -> WakerResult {
         *self.thread.get() = Some(thread::current());
         self.state.transact(|mut state| {
             Ok(match *state {
                 Pending | Loading => {
                     *state = Cancelling;
                     state.commit()?;
-                    CancelResult::Cancelling
+                    WakerResult::Cancelling
                 }
                 Finished { poisoned } => {
-                    CancelResult::Finished { poisoned }
+                    WakerResult::Finished { poisoned }
                 }
                 _ => unreachable!("{:?}", *state)
             })
         })
     }
 
+    // Wait for the producer thread to accept cancellation
     pub unsafe fn wait_cancel(&self) {
         loop {
             match self.state.load(Acquire) {
@@ -170,6 +171,7 @@ impl AtomicWaker {
         }
     }
 
+    // Accept cancellation on the producer thread, notifying the future thread.
     pub unsafe fn accept_cancel(this: *const Self) {
         (*this).state.transact(|mut state| {
             Ok(match *state {
@@ -217,7 +219,7 @@ impl Debug for AtomicWaker {
 
 #[cfg(test)]
 mod test {
-    use crate::waker::{FinishResult, CancelResult, AtomicWaker};
+    use crate::waker::{WakerResult, AtomicWaker};
     use std::future::Future;
     use futures::task::{Context, Poll};
     use std::pin::Pin;
@@ -259,7 +261,7 @@ mod test {
                 let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert_eq!(FinishResult::Finished { poisoned: false },
+                assert_eq!(WakerResult::Finished { poisoned: false },
                            AtomicWaker::finish(&tester.waiter as *const AtomicWaker, false));
                 assert_eq!(Poll::Ready(false), poll!(&mut tester));
             }
@@ -275,11 +277,11 @@ mod test {
                 assert_eq!(Poll::Pending, poll!(&mut tester));
 
                 match tester.waiter.start_cancel() {
-                    CancelResult::Cancelling => {
+                    WakerResult::Cancelling => {
                         AtomicWaker::accept_cancel(&tester.as_mut().waiter);
                         tester.waiter.wait_cancel();
                     }
-                    CancelResult::Finished { .. } => panic!(),
+                    WakerResult::Finished { .. } => panic!(),
                 }
             }
         });
@@ -292,11 +294,11 @@ mod test {
                 let tester = Tester { waiter: AtomicWaker::new() };
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
-                assert_eq!(FinishResult::Finished { poisoned: true },
+                assert_eq!(WakerResult::Finished { poisoned: true },
                            AtomicWaker::finish(&tester.waiter, true));
                 match tester.waiter.start_cancel() {
-                    CancelResult::Cancelling => panic!(),
-                    CancelResult::Finished { poisoned } => { assert!(poisoned) }
+                    WakerResult::Cancelling => panic!(),
+                    WakerResult::Finished { poisoned } => { assert!(poisoned) }
                 }
             }
         });
@@ -310,11 +312,11 @@ mod test {
                 pin_mut!(tester);
                 assert_eq!(Poll::Pending, poll!(&mut tester));
                 match tester.waiter.start_cancel() {
-                    CancelResult::Cancelling => {
+                    WakerResult::Cancelling => {
                         AtomicWaker::accept_cancel(&tester.waiter);
                         tester.waiter.wait_cancel();
                     }
-                    CancelResult::Finished { .. } => panic!(),
+                    WakerResult::Finished { .. } => panic!(),
                 }
             }
         });
@@ -333,11 +335,11 @@ mod test {
                     send.send(&*(&tester.waiter as *const AtomicWaker)).unwrap();
                     let result = if cancel {
                         match tester.waiter.start_cancel() {
-                            CancelResult::Cancelling => {
+                            WakerResult::Cancelling => {
                                 tester.waiter.wait_cancel();
                                 None
                             }
-                            CancelResult::Finished { poisoned } => Some(poisoned),
+                            WakerResult::Finished { poisoned } => Some(poisoned),
                         }
                     } else {
                         Some(tester.await)
@@ -352,12 +354,12 @@ mod test {
                     let waiter = recv.recv().unwrap();
                     let result =
                         match AtomicWaker::finish(waiter, i % 2 == 0) {
-                            FinishResult::Cancelling => {
+                            WakerResult::Cancelling => {
                                 AtomicWaker::accept_cancel(waiter);
-                                FinishResult::Cancelling
+                                WakerResult::Cancelling
                             }
-                            FinishResult::Finished { poisoned } =>
-                                FinishResult::Finished { poisoned }
+                            WakerResult::Finished { poisoned } =>
+                                WakerResult::Finished { poisoned }
                         };
                     results.push(result);
                 }
@@ -367,8 +369,8 @@ mod test {
             let r2 = h2.join().unwrap();
             for (send, recv) in r1.into_iter().zip(r2.into_iter()) {
                 match (cancel, send, recv) {
-                    (_, Some(o), FinishResult::Finished { poisoned: i }) if i == o => {}
-                    (true, None, FinishResult::Cancelling) => {}
+                    (_, Some(o), WakerResult::Finished { poisoned: i }) if i == o => {}
+                    (true, None, WakerResult::Cancelling) => {}
                     _ => panic!("Unexpected outcome {:?}", (cancel, send, recv))
                 }
             }

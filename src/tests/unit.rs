@@ -30,6 +30,7 @@ use rand_xorshift::XorShiftRng;
 use std::fmt::Debug;
 use futures_test::futures_core_reexport::core_reexport::fmt::Formatter;
 use crate::{Semaphore, AcquireFuture, AcquireError, SemaphoreGuard};
+use futures_test::std_reexport::sync::atomic::Ordering::SeqCst;
 
 
 struct TestFuture<'a> {
@@ -82,6 +83,7 @@ impl<'a> TestFuture<'a> {
 
 #[test]
 fn test_simple() {
+    // Binary semaphore should be exclusive:
     let semaphore = Semaphore::new(1);
     let mut a1 = TestFuture::new(&semaphore, 1);
     let g1 = a1.poll().unwrap().unwrap();
@@ -180,6 +182,15 @@ fn test_poison_release_add() {
     semaphore.release(Semaphore::MAX_AVAILABLE / 2);
     semaphore.release(Semaphore::MAX_AVAILABLE / 2 + 2);
     TestFuture::new(&semaphore, 2).poll().unwrap().err().unwrap();
+}
+
+#[test]
+fn test_poison_release_concurrent() {
+    let semaphore = Semaphore::new(0);
+    let mut future = TestFuture::new(&semaphore, 2);
+    assert!(future.poll().is_none());
+    semaphore.release(usize::MAX);
+    future.poll_if_woken().expect("done").err().expect("AcquireError");
 }
 
 
