@@ -9,6 +9,9 @@ repository = "https://github.com/nathdobson/async-weighted-semaphore"
 readme = "README.md"
 keywords = ["async", "asynchronous", "semaphore"]
 categories = ["asynchronous", "concurrency"]
+exclude = [
+    "**/.DS_Store",
+]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dev-dependencies]
