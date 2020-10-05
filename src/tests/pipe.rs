@@ -1,4 +1,4 @@
-use crate::{Semaphore, AcquireError};
+use crate::{Semaphore, PoisonError};
 use std::sync::Arc;
 use futures_test::std_reexport::collections::VecDeque;
 use async_std::sync::Mutex;
@@ -65,7 +65,7 @@ impl Reader {
 }
 
 impl Writer {
-    async fn write_all(&self, buf: &[u8]) -> Result<(), AcquireError> {
+    async fn write_all(&self, buf: &[u8]) -> Result<(), PoisonError> {
         assert!(buf.len() < self.inner.0.buffer.lock().await.capacity());
         self.inner.0.free.acquire(buf.len()).await?.forget();
         let mut lock = self.inner.0.buffer.lock().await;

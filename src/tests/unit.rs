@@ -1,12 +1,10 @@
 
-use futures::task::{SpawnExt};
 use std::sync::{Arc, Barrier, Mutex};
-
 
 
 use rand::{thread_rng, Rng, SeedableRng};
 
-use std::sync::atomic::{AtomicUsize, AtomicIsize, AtomicU32, AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicIsize, AtomicBool};
 use std::sync::atomic::Ordering::Relaxed;
 use std::task::{Context, Waker, Poll};
 use std::future::Future;
@@ -14,23 +12,12 @@ use std::{mem, thread, fmt};
 
 use futures_test::task::{AwokenCount, new_count_waker};
 use std::pin::Pin;
-
 use futures_test::std_reexport::panic::catch_unwind;
-use futures::{StreamExt};
-
-
-
-
-
-
-
-
 use futures_test::std_reexport::collections::BTreeMap;
 use rand_xorshift::XorShiftRng;
 use std::fmt::Debug;
 use futures_test::futures_core_reexport::core_reexport::fmt::Formatter;
-use crate::{Semaphore, AcquireFuture, AcquireError, SemaphoreGuard};
-
+use crate::{Semaphore, AcquireFuture, PoisonError, SemaphoreGuard};
 
 
 struct TestFuture<'a> {
@@ -61,13 +48,13 @@ impl<'a> TestFuture<'a> {
     fn count(&self) -> usize {
         self.count.get()
     }
-    fn poll(&mut self) -> Option<Result<SemaphoreGuard<'a>, AcquireError>> {
+    fn poll(&mut self) -> Option<Result<SemaphoreGuard<'a>, PoisonError>> {
         match self.inner.as_mut().poll(&mut Context::from_waker(&self.waker)) {
             Poll::Pending => None,
             Poll::Ready(x) => Some(x)
         }
     }
-    fn poll_if_woken(&mut self) -> Option<Result<SemaphoreGuard<'a>, AcquireError>> {
+    fn poll_if_woken(&mut self) -> Option<Result<SemaphoreGuard<'a>, PoisonError>> {
         let count = self.count.get();
         if self.old_count != count {
             self.old_count = count;
@@ -299,9 +286,9 @@ fn test_parallel_impl() {
         move || {
             let mut time = 0;
             let mut futures = BTreeMap::<usize, TestFuture>::new();
-            let on_guard = |guard: Result<SemaphoreGuard, AcquireError>| {
+            let on_guard = |guard: Result<SemaphoreGuard, PoisonError>| {
                 match guard {
-                    Err(AcquireError) => {}
+                    Err(PoisonError) => {}
                     Ok(guard) => {
                         let amount = guard.forget() as isize;
                         resource.fetch_sub(amount, Relaxed).checked_sub(amount).unwrap();

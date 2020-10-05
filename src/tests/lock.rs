@@ -1,4 +1,4 @@
-use crate::{Semaphore, AcquireError, SemaphoreGuard};
+use crate::{Semaphore, PoisonError, SemaphoreGuard};
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::thread;
@@ -29,16 +29,16 @@ impl<T: ?Sized> RwLock<T> {
             inner: UnsafeCell::new(inner),
         }
     }
-    async fn read(&self) -> Result<RwLockReadGuard<'_, T>, AcquireError> {
+    async fn read(&self) -> Result<RwLockReadGuard<'_, T>, PoisonError> {
         Ok(RwLockReadGuard { _guard: self.semaphore.acquire(1).await?, value: self.inner.get() })
     }
-    async fn write(&self) -> Result<RwLockWriteGuard<'_, T>, AcquireError> {
+    async fn write(&self) -> Result<RwLockWriteGuard<'_, T>, PoisonError> {
         Ok(RwLockWriteGuard { _guard: self.semaphore.acquire(Semaphore::MAX_AVAILABLE).await?, value: self.inner.get() })
     }
-    fn into_inner(self) -> Result<T, AcquireError> where T: Sized {
+    fn into_inner(self) -> Result<T, PoisonError> where T: Sized {
         match self.semaphore.try_acquire(0) {
             Ok(_) => Ok(self.inner.into_inner()),
-            Err(_) => Err(AcquireError),
+            Err(_) => Err(PoisonError),
         }
     }
 }

@@ -3,7 +3,12 @@ name = "async-weighted-semaphore"
 version = "0.1.0"
 authors = ["Nathan Dobson <nadobson@mac.com>"]
 edition = "2018"
-
+license = "MIT OR Apache-2.0"
+description = "An async weighted semaphore."
+repository = "https://github.com/nathdobson/async-weighted-semaphore"
+readme = "README.md"
+keywords = ["async", "asynchronous", "semaphore"]
+categories = ["asynchronous", "concurrency"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dev-dependencies]
@@ -12,6 +17,8 @@ async-std = "1.6.3"
 futures-test = "0.3.5"
 threadpool = "1.8.1"
 rand_xorshift = "0.2.0"
+async-channel = "1.4.2"
+version-sync = "0.9"
 lazy_static = "1.4.0"
 
 [dev-dependencies.futures]
