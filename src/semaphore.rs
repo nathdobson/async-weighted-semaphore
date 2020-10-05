@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::atomic::Atomic;
 use std::mem::size_of;
 use crate::release::ReleaseAction;
+#[allow(unused_imports)] // used by docs
 use crate::errors::PoisonError;
 
 /// An async weighted semaphore. See [crate documentation](index.html) for usage.

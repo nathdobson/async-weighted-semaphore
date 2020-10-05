@@ -139,7 +139,9 @@ pub use crate::guard::SemaphoreGuard;
 pub use crate::guard::SemaphoreGuardArc;
 pub use crate::acquire::{AcquireFuture, AcquireFutureArc};
 pub use semaphore::Semaphore;
+#[allow(unused_imports)] // used by docs
 use std::future::Future;
+#[allow(unused_imports)] // used by docs
 use std::task::Poll;
 
 mod atomic;
