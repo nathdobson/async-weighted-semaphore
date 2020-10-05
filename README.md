@@ -1,5 +1,11 @@
 # async-weighted-semaphore
 [![Build](https://travis-ci.com/nathdobson/async-weighted-semaphore.svg?branch=master)](https://travis-ci.com/github/nathdobson/async-weighted-semaphore)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](
+https://github.com/nathdobson/async-weighted-semaphore)
+[![Cargo](https://img.shields.io/crates/v/async-weighted-semaphore.svg)](
+https://crates.io/crates/async-weighted-semaphore)
+[![Documentation](https://docs.rs/async-weighted-semaphore/badge.svg)](
+https://docs.rs/async-weighted-semaphore)
 
 An async semaphore where any number of permits can be acquired or released in one call.
 
