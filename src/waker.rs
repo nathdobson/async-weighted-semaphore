@@ -140,8 +140,6 @@ impl AtomicWaker {
         })
     }
 
-    // Mark that the future is finished and wake the waker. The future may be cancelling, which
-    // makes this a no-op.
     pub unsafe fn start_cancel(&self) -> WakerResult {
         *self.thread.get() = Some(thread::current());
         self.state.transact(|mut state| {
