@@ -9,15 +9,13 @@ use std::{mem, thread, fmt};
 use std::thread::{Thread, panicking};
 use std::fmt::{Debug, Formatter};
 use std::ptr::null;
-use crate::waker::State::{Pending, Storing, Finished, Loading};
+use crate::waker::State::{Pending, Storing, Finished};
 
 #[derive(Copy, Clone, Eq, PartialOrd, PartialEq, Ord, Debug)]
 enum State {
-    Pending,
+    Pending { seq: usize },
     // A poll is in progress, storing a new waker.
-    Storing,
-    // A finish is in progress, loading the waker.
-    Loading,
+    Storing { seq: usize },
     // A finish has succeeded, and will call wake if necessary.
     Finished { poisoned: bool },
     // start_cancel has been called.
@@ -54,18 +52,33 @@ unsafe impl Sync for AtomicWaker {}
 
 impl Packable for State {
     unsafe fn encode(val: Self) -> usize {
-        mem::transmute::<_, u8>(val) as usize
+        match val {
+            Pending { seq } => seq << 3 | 0,
+            Storing { seq } => seq << 3 | 1,
+            Finished { poisoned: false } => 2,
+            Finished { poisoned: true } => 3,
+            Cancelling => 4,
+            Cancelled => 5,
+        }
     }
 
     unsafe fn decode(val: usize) -> Self {
-        mem::transmute(val as u8)
+        match val & 7 {
+            0 => Pending { seq: val >> 3 },
+            1 => Storing { seq: val >> 3 },
+            2 => Finished { poisoned: false },
+            3 => Finished { poisoned: true },
+            4 => Cancelling,
+            5 => Cancelled,
+            _ => unreachable!()
+        }
     }
 }
 
 impl AtomicWaker {
     pub unsafe fn new() -> Self {
         AtomicWaker {
-            state: Atomic::new(Pending),
+            state: Atomic::new(Pending { seq: 0 }),
             vtable: Atomic::new(null()),
             data: Atomic::new(null()),
             thread: UnsafeCell::new(None),
@@ -79,9 +92,9 @@ impl AtomicWaker {
         let mut current = self.state.load(Acquire);
         loop {
             match current {
-                Pending | Loading => {
-                    if self.state.cmpxchg_weak_acqrel(&mut current, Storing) {
-                        current = Storing;
+                Pending { seq } => {
+                    if self.state.cmpxchg_weak_acqrel(&mut current, Storing { seq }) {
+                        current = Storing { seq };
                         break;
                     }
                 }
@@ -100,13 +113,14 @@ impl AtomicWaker {
         }
         loop {
             match current {
-                Storing => {
-                    if self.state.cmpxchg_weak_acqrel(&mut current, Pending) {
+                Storing { seq } => {
+                    if self.state.cmpxchg_weak_acqrel(&mut current, Pending { seq: seq + 1 }) {
                         mem::forget(waker.take());
                         return Poll::Pending;
                     }
                 }
                 Finished { poisoned } => {
+                    // Ownership is exclusive at this point, so no memory barrier is needed.
                     return Poll::Ready(poisoned);
                 }
                 _ => unreachable!("{:?}", current)
@@ -119,12 +133,7 @@ impl AtomicWaker {
         let mut current = (*this).state.load(Acquire);
         loop {
             match current {
-                Pending => {
-                    if (*this).state.cmpxchg_weak_acqrel(&mut current, Loading) {
-                        current = Loading;
-                    }
-                }
-                Loading => {
+                Pending { .. } => {
                     let data = (*this).data.load(Relaxed);
                     let vtable = (*this).vtable.load(Relaxed);
                     if (*this).state.cmpxchg_weak_acqrel(&mut current, Finished { poisoned }) {
@@ -133,7 +142,7 @@ impl AtomicWaker {
                         return WakerResult::Finished { poisoned };
                     }
                 }
-                Storing => {
+                Storing { .. } => {
                     if (*this).state.cmpxchg_weak_acqrel(&mut current, Finished { poisoned }) {
                         return WakerResult::Finished { poisoned };
                     }
@@ -149,7 +158,7 @@ impl AtomicWaker {
         let mut current = self.state.load(Acquire);
         loop {
             match current {
-                Pending | Loading => {
+                Pending { .. } => {
                     if self.state.cmpxchg_weak_acqrel(&mut current, Cancelling) {
                         return WakerResult::Cancelling;
                     }
@@ -197,7 +206,7 @@ impl AtomicWaker {
 impl Drop for AtomicWaker {
     fn drop(&mut self) {
         match self.state.load(Relaxed) {
-            Pending | Cancelled => unsafe {
+            Pending { .. } | Cancelled => unsafe {
                 let data = self.data.load(Relaxed);
                 let vtable = self.vtable.load(Relaxed);
                 if vtable != null() {
