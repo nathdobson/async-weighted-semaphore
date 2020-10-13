@@ -1,6 +1,6 @@
 use std::{fmt, mem};
 use std::panic::{RefUnwindSafe, UnwindSafe};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Relaxed, Acquire};
 use crate::state::ReleaseState::Unlocked;
 use crate::state::AcquireState::{Available, Queued};
 use std::fmt::{Debug, Formatter};
@@ -142,25 +142,21 @@ impl Semaphore {
     /// }
     /// ```
     pub fn try_acquire(&self, amount: usize) -> Result<SemaphoreGuard, TryAcquireError> {
-        self.acquire.transact(|mut acquire| {
-            Ok(match *acquire {
-                Queued(_) => Err(TryAcquireError::WouldBlock),
+        let mut current = self.acquire.load(Acquire);
+        loop {
+            match current {
+                Queued(_) => return Err(TryAcquireError::WouldBlock),
                 Available(available) => {
-                    match available.into_usize() {
-                        Some(available) => {
-                            if amount <= available {
-                                *acquire = Available(Permits::new(available - amount));
-                                acquire.commit()?;
-                                Ok(SemaphoreGuard::new(self, amount))
-                            } else {
-                                Err(TryAcquireError::WouldBlock)
-                            }
-                        }
-                        None => Err(TryAcquireError::Poisoned),
+                    let available = available.into_usize().ok_or(TryAcquireError::Poisoned)?;
+                    if available < amount {
+                        return Err(TryAcquireError::WouldBlock);
+                    }
+                    if self.acquire.cmpxchg_weak_acqrel(&mut current, Available(Permits::new(available - amount))) {
+                        return Ok(SemaphoreGuard::new(self, amount));
                     }
                 }
-            })
-        })
+            }
+        }
     }
 
     /// Like [acquire](#method.acquire), but takes an [`Arc`] `<Semaphore>` and returns a guard that is `'static`, [`Send`] and [`Sync`].

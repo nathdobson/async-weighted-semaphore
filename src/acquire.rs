@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::future::Future;
 use crate::waker::{WakerResult};
 use crate::errors::PoisonError;
+use std::sync::atomic::Ordering::Acquire;
 
 /// A [`Future`] returned by [`Semaphore::acquire`] that produces a [`SemaphoreGuard`].
 pub struct AcquireFuture<'a>(pub(crate) UnsafeCell<Waiter>, pub(crate) PhantomData<&'a Semaphore>, pub(crate) PhantomPinned);
@@ -49,23 +50,24 @@ impl<'a> AcquireFuture<'a> {
     }
     // Try to acquire or add to queue.
     unsafe fn poll_enter(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<SemaphoreGuard<'a>, PoisonError>> {
-        (*self.waiter().semaphore).acquire.transact(|mut acquire| {
-            let (available, back) = match *acquire {
+        let acquire = &(*self.waiter().semaphore).acquire;
+        let mut current = acquire.load(Acquire);
+        loop {
+            let (available, back) = match current {
                 Queued(back) => (0, back),
                 Available(available) => {
                     let available = match available.into_usize() {
                         None => {
                             *self.waiter().step.get() = AcquireStep::Done;
-                            return Ok(Poll::Ready(Err(PoisonError)));
+                            return Poll::Ready(Err(PoisonError));
                         }
                         Some(available) => available,
                     };
                     if self.waiter().amount <= available {
-                        *acquire = Available(Permits::new(available - self.waiter().amount));
-                        acquire.commit()?;
+                        if !acquire.cmpxchg_weak_acqrel(&mut current, Available(Permits::new(available - self.waiter().amount))) { continue; }
                         *self.waiter().step.get() = AcquireStep::Done;
-                        return Ok(Poll::Ready(Ok(SemaphoreGuard::new(
-                            &*self.waiter().semaphore, self.waiter().amount))));
+                        return Poll::Ready(Ok(SemaphoreGuard::new(
+                            &*self.waiter().semaphore, self.waiter().amount)));
                     } else {
                         (available, null())
                     }
@@ -73,13 +75,12 @@ impl<'a> AcquireFuture<'a> {
             };
             assert!(self.waiter().waker.poll(cx).is_pending());
             *self.waiter().prev.get() = back;
-            *acquire = Queued(self.0.get());
-            acquire.commit()?;
+            if !acquire.cmpxchg_weak_acqrel(&mut current, Queued(self.0.get())) { continue; }
             *self.waiter().step.get() = AcquireStep::Waiting;
             // Even if available==0, this is necessary to set release to LockedDirty.
             (*self.waiter().semaphore).release(available);
-            Ok(Poll::Pending)
-        })
+            return Poll::Pending;
+        }
     }
 
     unsafe fn poll_waiting(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<SemaphoreGuard<'a>, PoisonError>> {
@@ -142,12 +143,12 @@ impl<'a> Drop for AcquireFuture<'a> {
                     match self.waiter().waker.start_cancel() {
                         WakerResult::Cancelling => {
                             // Push onto the cancel queue.
-                            (*self.waiter().semaphore).next_cancel.transact(|mut next_cancel| {
-                                *self.waiter().next_cancel.get() = *next_cancel;
-                                *next_cancel = self.0.get();
-                                next_cancel.commit()?;
-                                Ok(())
-                            });
+                            let next_cancel = &(*self.waiter().semaphore).next_cancel;
+                            let mut current = next_cancel.load(Acquire);
+                            loop {
+                                *self.waiter().next_cancel.get() = current;
+                                if next_cancel.cmpxchg_weak_acqrel(&mut current, self.0.get()) { break; }
+                            }
                             // Ensure a flush of the cancel queue is completed or at least scheduled.
                             (*self.waiter().semaphore).release(0);
                             // Wait for a notification that the node can be dropped

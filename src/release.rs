@@ -4,7 +4,7 @@ use crate::state::ReleaseState::{Unlocked, Locked, LockedDirty};
 use crate::state::AcquireState::{Queued, Available};
 use std::ptr::null;
 use crate::waker::{AtomicWaker, WakerResult};
-use std::sync::atomic::Ordering::AcqRel;
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 
 // The state of a single call to release.
 pub struct ReleaseAction<'a> {
@@ -16,47 +16,52 @@ impl<'a> ReleaseAction<'a> {
     // Attempt to acquire the release lock. If it is locked, defer the release for the lock owner
     // by including the new permits in ReleaseState.
     pub unsafe fn lock_or_else_defer(&mut self) -> bool {
-        self.sem.release.transact(|mut release| {
-            Ok(match *release {
+        let mut current = self.sem.release.load(Acquire);
+        loop {
+            match current {
                 Unlocked(available) => {
-                    *release = Locked;
-                    release.commit()?;
-                    self.releasable += available;
-                    true
+                    if self.sem.release.cmpxchg_weak_acqrel(&mut current, Locked) {
+                        self.releasable += available;
+                        return true;
+                    }
                 }
                 Locked => {
-                    *release = LockedDirty(self.releasable);
-                    release.commit()?;
-                    false
+                    if self.sem.release.cmpxchg_weak_acqrel(&mut current, LockedDirty(self.releasable)) {
+                        return false;
+                    }
                 }
                 LockedDirty(available) => {
-                    *release = LockedDirty(available + self.releasable);
-                    release.commit()?;
-                    false
+                    if self.sem.release.cmpxchg_weak_acqrel(&mut current, LockedDirty(available + self.releasable)) {
+                        return false;
+                    }
                 }
-            })
-        })
+            }
+        }
     }
     // If the queue is empty, make the permits available in AcquireState. Otherwise take all nodes
     // in AcquireState and add next edges.
     unsafe fn flip(&mut self) {
-        self.sem.acquire.transact(|mut acquire| {
-            Ok(match *acquire {
+        let mut current = self.sem.acquire.load(Acquire);
+        loop {
+            match current {
                 Queued(back) if back == null() && *self.sem.front.get() == null() => {
-                    *acquire = Available(self.releasable);
-                    acquire.commit()?;
-                    self.releasable = Permits::new(0);
+                    if self.sem.acquire.cmpxchg_weak_acqrel(&mut current, Available(self.releasable)) {
+                        self.releasable = Permits::new(0);
+                        break;
+                    }
                 }
                 Available(available) => {
-                    assert!(*self.sem.front.get() == null());
-                    *acquire = Available(available + self.releasable);
-                    acquire.commit()?;
-                    self.releasable = Permits::new(0);
+                    if self.sem.acquire.cmpxchg_weak_acqrel(&mut current, Available(available + self.releasable)) {
+                        assert!(*self.sem.front.get() == null());
+                        self.releasable = Permits::new(0);
+                        break;
+                    }
                 }
                 Queued(back) => {
-                    if back != null() {
-                        *acquire = Queued(null());
-                        acquire.commit()?;
+                    if back == null() {
+                        break;
+                    }
+                    if self.sem.acquire.cmpxchg_weak_acqrel(&mut current, Queued(null())) {
                         let mut waiter = back;
                         while waiter != null() {
                             let prev = *(*waiter).prev.get();
@@ -75,10 +80,11 @@ impl<'a> ReleaseAction<'a> {
                             waiter = prev;
                         }
                         *self.sem.middle.get() = back;
+                        break;
                     }
                 }
-            })
-        })
+            }
+        }
     }
 
     // Clear the cancellation queue, removing nodes from the finish queue. Nodes should have next edges.
@@ -134,22 +140,23 @@ impl<'a> ReleaseAction<'a> {
     // Attempt to unlock the release lock. If there were concurrent releases or cancels, keep the
     // lock in order to complete those operations.
     unsafe fn try_unlock(&mut self) -> bool {
-        self.sem.release.transact(|mut release| {
-            Ok(match *release {
+        let mut current = self.sem.release.load(Acquire);
+        loop {
+            match current {
                 LockedDirty(available) => {
-                    *release = Locked;
-                    release.commit()?;
-                    self.releasable += available;
-                    false
+                    if self.sem.release.cmpxchg_weak_acqrel(&mut current, Locked) {
+                        self.releasable += available;
+                        return false;
+                    }
                 }
                 Unlocked(_) => unreachable!(),
                 Locked => {
-                    *release = Unlocked(self.releasable);
-                    release.commit()?;
-                    true
+                    if self.sem.release.cmpxchg_weak_acqrel(&mut current, Unlocked(self.releasable)) {
+                        return true;
+                    }
                 }
-            })
-        })
+            }
+        }
     }
 
     // Perform a release operation

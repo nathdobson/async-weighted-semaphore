@@ -6,7 +6,7 @@ use crate::waker::State::{Cancelled, Cancelling};
 use crate::atomic::{Atomic, Packable};
 use std::{mem, thread, fmt};
 
-use std::thread::Thread;
+use std::thread::{Thread, panicking};
 use std::fmt::{Debug, Formatter};
 use std::ptr::null;
 use crate::waker::State::{Pending, Storing, Finished, Loading};
@@ -76,85 +76,90 @@ impl AtomicWaker {
     #[must_use]
     pub unsafe fn poll(&self, context: &mut Context) -> Poll<bool> {
         let mut waker = Some(context.waker().clone());
-        self.state.transact(|mut state| {
-            Ok(match *state {
+        let mut current = self.state.load(Acquire);
+        loop {
+            match current {
                 Pending | Loading => {
-                    *state = Storing;
-                    state.commit()?;
-                    let (data, vtable) =
-                        mem::transmute_copy::<_, (*const (), *const RawWakerVTable)>(waker.as_ref().unwrap());
-                    let old_data = self.data.load(Relaxed);
-                    let old_vtable = self.vtable.load(Relaxed);
-                    self.data.store(data, Relaxed);
-                    self.vtable.store(vtable, Relaxed);
-                    if old_vtable != null() {
-                        mem::drop(mem::transmute::<_, Waker>((old_data, old_vtable)));
+                    if self.state.cmpxchg_weak_acqrel(&mut current, Storing) {
+                        current = Storing;
+                        break;
                     }
-                    self.state.transact(|mut state| {
-                        Ok(match *state {
-                            Storing => {
-                                *state = Pending;
-                                state.commit()?;
-                                mem::forget(waker.take());
-                                Poll::Pending
-                            }
-                            Finished { poisoned } => {
-                                Poll::Ready(poisoned)
-                            }
-                            _ => unreachable!()
-                        })
-                    })
                 }
-                Finished { poisoned } => Poll::Ready(poisoned),
+                Finished { poisoned } => return Poll::Ready(poisoned),
                 _ => unreachable!()
-            })
-        })
+            };
+        }
+        let (data, vtable) =
+            mem::transmute_copy::<_, (*const (), *const RawWakerVTable)>(waker.as_ref().unwrap());
+        let old_data = self.data.load(Relaxed);
+        let old_vtable = self.vtable.load(Relaxed);
+        self.data.store(data, Relaxed);
+        self.vtable.store(vtable, Relaxed);
+        if old_vtable != null() {
+            mem::drop(mem::transmute::<_, Waker>((old_data, old_vtable)));
+        }
+        loop {
+            match current {
+                Storing => {
+                    if self.state.cmpxchg_weak_acqrel(&mut current, Pending) {
+                        mem::forget(waker.take());
+                        return Poll::Pending;
+                    }
+                }
+                Finished { poisoned } => {
+                    return Poll::Ready(poisoned);
+                }
+                _ => unreachable!("{:?}", current)
+            }
+        }
     }
 
     // Signal that the future is finished.
     pub unsafe fn finish(this: *const Self, poisoned: bool) -> WakerResult {
-        (*this).state.transact(|mut state| {
-            Ok(match *state {
+        let mut current = (*this).state.load(Acquire);
+        loop {
+            match current {
                 Pending => {
-                    *state = Loading;
-                    let new = state.commit()?;
-                    Err(new)?
+                    if (*this).state.cmpxchg_weak_acqrel(&mut current, Loading) {
+                        current = Loading;
+                    }
                 }
                 Loading => {
                     let data = (*this).data.load(Relaxed);
                     let vtable = (*this).vtable.load(Relaxed);
-                    *state = Finished { poisoned };
-                    state.commit()?;
-                    let waker = mem::transmute::<_, Waker>((data, vtable));
-                    waker.wake();
-                    WakerResult::Finished { poisoned }
+                    if (*this).state.cmpxchg_weak_acqrel(&mut current, Finished { poisoned }) {
+                        let waker = mem::transmute::<_, Waker>((data, vtable));
+                        waker.wake();
+                        return WakerResult::Finished { poisoned };
+                    }
                 }
                 Storing => {
-                    *state = Finished { poisoned };
-                    state.commit()?;
-                    WakerResult::Finished { poisoned }
+                    if (*this).state.cmpxchg_weak_acqrel(&mut current, Finished { poisoned }) {
+                        return WakerResult::Finished { poisoned };
+                    }
                 }
-                Cancelling => WakerResult::Cancelling,
+                Cancelling => return WakerResult::Cancelling,
                 _ => unreachable!()
-            })
-        })
+            }
+        }
     }
 
     pub unsafe fn start_cancel(&self) -> WakerResult {
         *self.thread.get() = Some(thread::current());
-        self.state.transact(|mut state| {
-            Ok(match *state {
+        let mut current = self.state.load(Acquire);
+        loop {
+            match current {
                 Pending | Loading => {
-                    *state = Cancelling;
-                    state.commit()?;
-                    WakerResult::Cancelling
+                    if self.state.cmpxchg_weak_acqrel(&mut current, Cancelling) {
+                        return WakerResult::Cancelling;
+                    }
                 }
                 Finished { poisoned } => {
-                    WakerResult::Finished { poisoned }
+                    return WakerResult::Finished { poisoned };
                 }
-                _ => unreachable!("{:?}", *state)
-            })
-        })
+                _ => unreachable!("{:?}", current)
+            }
+        }
     }
 
     // Wait for the producer thread to accept cancellation
@@ -170,20 +175,22 @@ impl AtomicWaker {
 
     // Accept cancellation on the producer thread, notifying the future thread.
     pub unsafe fn accept_cancel(this: *const Self) {
-        (*this).state.transact(|mut state| {
-            Ok(match *state {
+        let mut current = (*this).state.load(Acquire);
+        loop {
+            match current {
                 Cancelling => {
-                    *state = Cancelled;
                     let thread = (*(*this).thread.get()).take().unwrap();
-                    if let Err(e) = state.commit() {
+                    if (*this).state.cmpxchg_weak_acqrel(&mut current, Cancelled) {
+                        thread.unpark();
+                        break;
+                    } else {
                         *(*this).thread.get() = Some(thread);
-                        return Err(e);
+                        continue;
                     }
-                    thread.unpark();
                 }
-                _ => unreachable!("{:?}", *state)
-            })
-        })
+                _ => unreachable!("{:?}", current)
+            }
+        }
     }
 }
 
@@ -198,7 +205,7 @@ impl Drop for AtomicWaker {
                 }
             }
             Finished { .. } => {}
-            _ => unreachable!()
+            _ => if !panicking() { unreachable!() }
         }
     }
 }
@@ -220,14 +227,11 @@ mod test {
     use std::future::Future;
     use futures::task::{Context, Poll};
     use std::pin::Pin;
-    
+
     use futures::pin_mut;
     use futures::poll;
-    
-    
-    
-    
-    
+
+
     use futures::executor::block_on;
     use std::thread;
     use futures_test::std_reexport::sync::mpsc::sync_channel;
