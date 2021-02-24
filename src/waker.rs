@@ -234,7 +234,7 @@ mod test {
 
     use futures::executor::block_on;
     use std::thread;
-    use futures_test::std_reexport::sync::mpsc::sync_channel;
+    use std::sync::mpsc::sync_channel;
 
     struct Tester {
         waiter: AtomicWaker,

@@ -1,6 +1,6 @@
 use crate::{Semaphore, PoisonError};
 use std::sync::Arc;
-use futures_test::std_reexport::collections::VecDeque;
+use std::collections::VecDeque;
 use async_std::sync::Mutex;
 use std::io::{BufReader, BufRead};
 use std::{mem, thread};
