@@ -12,11 +12,11 @@ use std::{mem, thread, fmt};
 
 use futures_test::task::{AwokenCount, new_count_waker};
 use std::pin::Pin;
-use futures_test::std_reexport::panic::catch_unwind;
-use futures_test::std_reexport::collections::BTreeMap;
+use std::panic::catch_unwind;
+use std::collections::BTreeMap;
 use rand_xorshift::XorShiftRng;
 use std::fmt::Debug;
-use futures_test::futures_core_reexport::core_reexport::fmt::Formatter;
+use std::fmt::Formatter;
 use crate::{Semaphore, AcquireFuture, PoisonError, SemaphoreGuard};
 
 
