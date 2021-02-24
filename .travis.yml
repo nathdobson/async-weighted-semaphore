@@ -10,9 +10,12 @@ stages:
 jobs:
   include:
     - stage: "functional"
+      env: CARGO_INCREMENTAL=0 RELEASE=false
+      script: cargo test --target-dir=target/functional
+
     - stage: "functional"
-      env: RELEASE=true
-      script: cargo test --release
+      env: CARGO_INCREMENTAL=0 RELEASE=true
+      script: cargo test --release --target-dir=target/functional
 
     - stage: "sanitizer"
       rust: nightly
@@ -20,33 +23,39 @@ jobs:
         - |
           set -e
           rustup component add rust-src
-          RUSTFLAGS=-Zsanitizer="$SANITIZER" cargo test --lib --release -Zbuild-std --target x86_64-unknown-linux-gnu --target-dir=target/"$SANITIZER"
-      env: SANITIZER=address
+          RUSTFLAGS=-Zsanitizer="$SANITIZER" \
+            cargo test \
+            --lib \
+            --release \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            --target-dir=target/"$SANITIZER"
+      env: CARGO_INCREMENTAL=0 SANITIZER=address
     - stage: "sanitizer"
       rust: nightly
       script: *sanitizer_script
-      env: SANITIZER=memory
+      env: CARGO_INCREMENTAL=0 SANITIZER=memory
     - stage: "sanitizer"
       rust: nightly
       script: *sanitizer_script
-      env: SANITIZER=thread
+      env: CARGO_INCREMENTAL=0 SANITIZER=thread
     - stage: "sanitizer"
       rust: nightly
       script: *sanitizer_script
-      env: SANITIZER=leak
+      env: CARGO_INCREMENTAL=0 SANITIZER=leak
 
     - stage: "arch"
-      script: cargo test
+      script: cargo test --target-dir=target/$TARGET
       arch: arm64
-      env: TARGET=arm64
+      env: CARGO_INCREMENTAL=0 TARGET=arm64
     - stage: "arch"
-      script: cargo test
+      script: cargo test --target-dir=target/$TARGET
       arch: ppc64le
-      env: TARGET=ppc64le
+      env: CARGO_INCREMENTAL=0 TARGET=ppc64le
     - stage: "arch"
-      script: cargo test
+      script: cargo test --target-dir=target/$TARGET
       arch: s390x
-      env: TARGET=s390x
+      env: CARGO_INCREMENTAL=0 TARGET=s390x
     - stage: "arch"
       addons:
         apt:
@@ -56,12 +65,21 @@ jobs:
         - |
           set -e
           rustup target add i686-unknown-linux-gnu
-          cargo test --target i686-unknown-linux-gnu --target-dir=target/i686
-      env: TARGET=i686
+          cargo test --target i686-unknown-linux-gnu --target-dir=target/$TARGET
+      env: CARGO_INCREMENTAL=0 TARGET=i686
 
     - stage: "compiler"
       rust: beta
-      env: RUST=beta
+      script: cargo test --target-dir=target/$RUST
+      env: CARGO_INCREMENTAL=0 RUST=beta
     - stage: "compiler"
       rust: nightly
-      env: RUST=nightly
+      script: cargo test --target-dir=target/$RUST
+      env: CARGO_INCREMENTAL=0 RUST=nightly
+
+before_cache:
+  - find ./target/ -maxdepth 2 -type f -delete
+  - find ./target/ -name async_weighted_semaphore* -type f -delete
+  - find ./target/ -name .rustc_info.json -type f -delete
+  - rm -rf "$TRAVIS_HOME/.cargo/registry/index"
+  - rm -rf "$TRAVIS_HOME/.cargo/registry/src"
