@@ -76,6 +76,10 @@ jobs:
       rust: nightly
       script: cargo test --target-dir=target/$RUST
       env: CARGO_INCREMENTAL=0 RUST=nightly
+  allow_failures:
+    # These architectures have Tier 2 support from rustc, so ignore failures.
+    - arch: s390x
+    - arch: ppc64le
 
 before_cache:
   - find ./target/ -maxdepth 2 -type f -delete
