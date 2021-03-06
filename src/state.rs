@@ -37,6 +37,17 @@ pub(crate) enum AcquireState {
     Available(Permits),
 }
 
+impl AcquireState {
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> Option<usize> {
+        if let Available(permits) = self {
+            permits.into_usize()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub enum AcquireStep {
     // The future was just created

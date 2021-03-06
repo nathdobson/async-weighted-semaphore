@@ -10,6 +10,7 @@ use std::task::{Context, Waker, Poll};
 use std::future::Future;
 use std::{mem, thread, fmt};
 
+use futures::FutureExt;
 use futures_test::task::{AwokenCount, new_count_waker};
 use std::pin::Pin;
 use std::panic::catch_unwind;
@@ -17,7 +18,7 @@ use std::collections::BTreeMap;
 use rand_xorshift::XorShiftRng;
 use std::fmt::Debug;
 use std::fmt::Formatter;
-use crate::{Semaphore, AcquireFuture, PoisonError, SemaphoreGuard};
+use crate::{Semaphore, AcquireFuture, PoisonError, SemaphoreGuard, SemaphoreGuardArc};
 
 
 struct TestFuture<'a> {
@@ -124,6 +125,124 @@ fn test_cancel() {
     mem::drop(a1);
     assert_eq!(a2.count(), 1);
     assert!(a2.poll().is_some());
+}
+
+#[test]
+fn test_extend() {
+    let semaphore = Semaphore::new(15);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = TestFuture::new(&semaphore, 10).poll().unwrap().unwrap();
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(5));
+    let g2 = TestFuture::new(&semaphore, 5).poll().unwrap().unwrap();
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(0));
+    g1.extend(g2);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(0));
+    drop(g1);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+}
+
+// Attempting to combine guards will poison the semaphores if the permits would overflow
+#[test]
+fn test_extend_overflow() {
+    let semaphore = Semaphore::new(Semaphore::MAX_AVAILABLE);
+    let mut g1 = TestFuture::new(&semaphore, Semaphore::MAX_AVAILABLE).poll().unwrap().unwrap();
+    let g2 = SemaphoreGuard::new(&semaphore, 1);
+    g1.extend(g2);
+    drop(g1);
+    // At this point, the semaphore should be poisoned
+    TestFuture::new(&semaphore, 1).poll().unwrap().err().unwrap();
+}
+
+// Atempting to combine guards from different semaphores should poison both
+#[test]
+fn test_extend_wrong_sems() {
+    let semaphore1 = Semaphore::new(15);
+    let semaphore2 = Semaphore::new(15);
+    let mut g1 = TestFuture::new(&semaphore1, 10).poll().unwrap().unwrap();
+    let g2 = TestFuture::new(&semaphore2, 5).poll().unwrap().unwrap();
+    g1.extend(g2);
+    drop(g1);
+    // At this point, both semaphores should be poisoned
+    TestFuture::new(&semaphore1, 1).poll().unwrap().err().unwrap();
+    TestFuture::new(&semaphore2, 1).poll().unwrap().err().unwrap();
+}
+
+#[test]
+fn test_extend_arc() {
+    let semaphore = Arc::new(Semaphore::new(15));
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = semaphore.acquire_arc(10).now_or_never().unwrap().unwrap();
+    let g2 = semaphore.acquire_arc(5).now_or_never().unwrap().unwrap();
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(0));
+    g1.extend(g2);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(0));
+    drop(g1);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+}
+
+#[test]
+fn test_extend_arc_wrong_sems() {
+    let semaphore1 = Arc::new(Semaphore::new(15));
+    let semaphore2 = Arc::new(Semaphore::new(15));
+    let mut g1 = semaphore1.acquire_arc(10).now_or_never().unwrap().unwrap();
+    let g2 = semaphore2.acquire_arc(5).now_or_never().unwrap().unwrap();
+    g1.extend(g2);
+    drop(g1);
+    // At this point, both semaphores should be poisoned
+    assert!(semaphore1.acquire_arc(1).now_or_never().unwrap().is_err());
+    assert!(semaphore2.acquire_arc(1).now_or_never().unwrap().is_err());
+}
+
+// Attempting to combine guards will poison the semaphores if the permits would overflow
+#[test]
+fn test_extend_arc_overflow() {
+    let semaphore = Arc::new(Semaphore::new(Semaphore::MAX_AVAILABLE));
+    let mut g1 = semaphore.acquire_arc(Semaphore::MAX_AVAILABLE).now_or_never().unwrap().unwrap();
+    let g2 = SemaphoreGuardArc::new(semaphore.clone(), 1);
+    g1.extend(g2);
+    drop(g1);
+    // At this point, the semaphore should be poisoned
+    assert!(semaphore.acquire_arc(1).now_or_never().unwrap().is_err());
+}
+
+#[test]
+fn test_split() {
+    let semaphore = Semaphore::new(15);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = TestFuture::new(&semaphore, 15).poll().unwrap().unwrap();
+    let g2 = g1.split(5).unwrap();
+    drop(g2);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(5));
+    drop(g1);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+}
+
+#[test]
+fn test_split_underflow() {
+    let semaphore = Semaphore::new(15);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = TestFuture::new(&semaphore, 5).poll().unwrap().unwrap();
+    assert!(g1.split(10).is_err());
+}
+
+#[test]
+fn test_split_arc() {
+    let semaphore = Arc::new(Semaphore::new(15));
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = semaphore.acquire_arc(15).now_or_never().unwrap().unwrap();
+    let g2 = g1.split(5).unwrap();
+    drop(g2);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(5));
+    drop(g1);
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+}
+
+#[test]
+fn test_split_arc_underflow() {
+    let semaphore = Arc::new(Semaphore::new(15));
+    assert_eq!(semaphore.acquire.load(Relaxed).available(), Some(15));
+    let mut g1 = semaphore.acquire_arc(5).now_or_never().unwrap().unwrap();
+    assert!(g1.split(10).is_err());
 }
 
 #[test]

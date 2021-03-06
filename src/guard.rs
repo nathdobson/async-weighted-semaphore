@@ -31,10 +31,37 @@ pub struct SemaphoreGuardArc {
     panicking: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemaphoreGuardSplitErr {
+    Underflow
+}
+
 impl<'a> SemaphoreGuard<'a> {
     pub fn new(semaphore: &'a Semaphore, amount: usize) -> Self {
         SemaphoreGuard { semaphore, amount, panicking: panicking() }
     }
+
+    /// Combine two `SemaphoreGuard`s into one, with the sum of the originals' permits.
+    ///
+    /// # Examples
+    /// ```
+    /// # use async_weighted_semaphore::Semaphore;
+    /// # tokio_test::block_on(async {
+    /// let semaphore = Semaphore::new(15);
+    /// let mut g1 = semaphore.acquire(10).await.unwrap();
+    /// let g2 = semaphore.acquire(5).await.unwrap();
+    /// g1.extend(g2);
+    /// # })
+    /// ```
+    pub fn extend(&mut self, other: SemaphoreGuard<'a>) {
+        if std::ptr::eq(self.semaphore, other.semaphore) {
+            self.amount += other.forget();
+        } else {
+            self.semaphore.poison();
+            other.semaphore.poison();
+        }
+    }
+
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
     /// correspond one-to-one with `acquires` or it's difficult to send the guard to the releaser.
     /// # Examples
@@ -63,12 +90,63 @@ impl<'a> SemaphoreGuard<'a> {
         mem::forget(self);
         amount
     }
+
+    /// Split this `SemaphoreGuard` into two.
+    ///
+    /// The new guard will have `permits` permits, and this guard's permits will be reduced
+    /// accordingly.
+    ///
+    /// # Examples
+    /// ```
+    /// # use async_weighted_semaphore::Semaphore;
+    /// # tokio_test::block_on(async {
+    /// let semaphore = Semaphore::new(15);
+    /// let mut g1 = semaphore.acquire(15).await.unwrap();
+    /// let g2 = g1.split(5).unwrap();
+    /// # })
+    /// ```
+    pub fn split(&mut self, permits: usize) -> Result<SemaphoreGuard<'a>, SemaphoreGuardSplitErr> {
+        if self.amount >= permits {
+            self.amount -= permits;
+            Ok(SemaphoreGuard {
+                semaphore: self.semaphore.clone(),
+                amount: permits,
+                panicking: self.panicking
+            })
+        } else {
+            Err(SemaphoreGuardSplitErr::Underflow)
+        }
+    }
 }
 
 impl SemaphoreGuardArc {
     pub fn new(semaphore: Arc<Semaphore>, amount: usize) -> Self {
         SemaphoreGuardArc { semaphore: Some(semaphore), amount, panicking: panicking() }
     }
+
+    /// Combine two `SemaphoreGuardArc`s into one, with the sum of the originals' permits.
+    ///
+    /// # Examples
+    /// ```
+    /// # use async_weighted_semaphore::Semaphore;
+    /// # tokio_test::block_on(async {
+    /// let semaphore = Semaphore::new(15);
+    /// let mut g1 = semaphore.acquire_arc(10).await.unwrap();
+    /// let g2 = semaphore.acquire_arc(5).await.unwrap();
+    /// g1.extend(g2);
+    /// # })
+    /// ```
+    pub fn extend(&mut self, other: SemaphoreGuardArc) {
+        let sem1 = self.semaphore.as_ref().unwrap();
+        let sem2 = other.semaphore.as_ref().unwrap();
+        if Arc::ptr_eq(sem1, sem2) {
+            self.amount += other.forget();
+        } else {
+            sem1.poison();
+            sem2.poison();
+        }
+    }
+
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
     /// correspond one-to-one with `acquires` or it's difficult to send the guard to the releaser.
     /// # Examples
@@ -98,6 +176,33 @@ impl SemaphoreGuardArc {
         let amount = self.amount;
         mem::forget(self);
         amount
+    }
+
+    /// Split this `SemaphoreGuardArc` into two.
+    ///
+    /// The new guard will have `permits` permits, and this guard's permits will be reduced
+    /// accordingly.
+    ///
+    /// # Examples
+    /// ```
+    /// # use async_weighted_semaphore::Semaphore;
+    /// # tokio_test::block_on(async {
+    /// let semaphore = Arc::new(Semaphore::new(15));
+    /// let mut g1 = semaphore.acquire_arc(15).await.unwrap();
+    /// let g2 = g1.split(5).unwrap();
+    /// # })
+    /// ```
+    pub fn split(&mut self, permits: usize) -> Result<SemaphoreGuardArc, SemaphoreGuardSplitErr> {
+        if self.amount >= permits {
+            self.amount -= permits;
+            Ok(SemaphoreGuardArc {
+                semaphore: self.semaphore.clone(),
+                amount: permits,
+                panicking: self.panicking
+            })
+        } else {
+            Err(SemaphoreGuardSplitErr::Underflow)
+        }
     }
 }
 

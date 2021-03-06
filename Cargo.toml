@@ -25,6 +25,7 @@ version-sync = "0.9"
 lazy_static = "1.4.0"
 tokio = { version = "0.2", features = ["full"] }
 futures-locks = "0.6.0"
+tokio-test = "0.2"
 
 [dev-dependencies.futures]
 version = "0.3.5"
