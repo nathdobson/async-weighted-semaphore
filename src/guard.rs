@@ -26,7 +26,7 @@ pub struct SemaphoreGuard<'a> {
 /// is dropped (falls out of scope). Can be sent between threads.
 #[must_use]
 pub struct SemaphoreGuardArc {
-    semaphore: Option<Arc<Semaphore>>,
+    semaphore: Arc<Semaphore>,
     amount: usize,
     panicking: bool,
 }
@@ -67,7 +67,7 @@ impl<'a> SemaphoreGuard<'a> {
 
 impl SemaphoreGuardArc {
     pub fn new(semaphore: Arc<Semaphore>, amount: usize) -> Self {
-        SemaphoreGuardArc { semaphore: Some(semaphore), amount, panicking: panicking() }
+        SemaphoreGuardArc { semaphore, amount, panicking: panicking() }
     }
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
     /// correspond one-to-one with `acquires` or it's difficult to send the guard to the releaser.
@@ -93,8 +93,7 @@ impl SemaphoreGuardArc {
     ///     }
     /// }
     /// ```
-    pub fn forget(mut self) -> usize {
-        self.semaphore = None;
+    pub fn forget(self) -> usize {
         let amount = self.amount;
         mem::forget(self);
         amount
@@ -115,12 +114,10 @@ impl<'a> Drop for SemaphoreGuard<'a> {
 
 impl Drop for SemaphoreGuardArc {
     fn drop(&mut self) {
-        if let Some(semaphore) = self.semaphore.take() {
-            if !self.panicking && panicking() {
-                semaphore.poison();
-            } else {
-                semaphore.release(self.amount);
-            }
+        if !self.panicking && panicking() {
+            self.semaphore.poison();
+        } else {
+            self.semaphore.release(self.amount);
         }
     }
 }
