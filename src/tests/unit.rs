@@ -155,16 +155,13 @@ fn test_extend_overflow() {
 
 // Atempting to combine guards from different semaphores should poison both
 #[test]
+#[should_panic(expected = "Can't extend a guard with a guard from a different Semaphore")]
 fn test_extend_wrong_sems() {
     let semaphore1 = Semaphore::new(15);
     let semaphore2 = Semaphore::new(15);
     let mut g1 = TestFuture::new(&semaphore1, 10).poll().unwrap().unwrap();
     let g2 = TestFuture::new(&semaphore2, 5).poll().unwrap().unwrap();
     g1.extend(g2);
-    drop(g1);
-    // At this point, both semaphores should be poisoned
-    TestFuture::new(&semaphore1, 1).poll().unwrap().err().unwrap();
-    TestFuture::new(&semaphore2, 1).poll().unwrap().err().unwrap();
 }
 
 #[test]
@@ -181,16 +178,13 @@ fn test_extend_arc() {
 }
 
 #[test]
+#[should_panic(expected = "Can't extend a guard with a guard from a different Semaphore")]
 fn test_extend_arc_wrong_sems() {
     let semaphore1 = Arc::new(Semaphore::new(15));
     let semaphore2 = Arc::new(Semaphore::new(15));
     let mut g1 = semaphore1.acquire_arc(10).now_or_never().unwrap().unwrap();
     let g2 = semaphore2.acquire_arc(5).now_or_never().unwrap().unwrap();
     g1.extend(g2);
-    drop(g1);
-    // At this point, both semaphores should be poisoned
-    assert!(semaphore1.acquire_arc(1).now_or_never().unwrap().is_err());
-    assert!(semaphore2.acquire_arc(1).now_or_never().unwrap().is_err());
 }
 
 // Attempting to combine guards will poison the semaphores if the permits would overflow

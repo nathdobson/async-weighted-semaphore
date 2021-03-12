@@ -54,12 +54,9 @@ impl<'a> SemaphoreGuard<'a> {
     /// # })
     /// ```
     pub fn extend(&mut self, other: SemaphoreGuard<'a>) {
-        if std::ptr::eq(self.semaphore, other.semaphore) {
-            self.amount += other.forget();
-        } else {
-            self.semaphore.poison();
-            other.semaphore.poison();
-        }
+        assert!(std::ptr::eq(self.semaphore, other.semaphore),
+            "Can't extend a guard with a guard from a different Semaphore");
+        self.amount += other.forget();
     }
 
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
@@ -139,12 +136,9 @@ impl SemaphoreGuardArc {
     pub fn extend(&mut self, other: SemaphoreGuardArc) {
         let sem1 = self.semaphore.as_ref().unwrap();
         let sem2 = other.semaphore.as_ref().unwrap();
-        if Arc::ptr_eq(sem1, sem2) {
-            self.amount += other.forget();
-        } else {
-            sem1.poison();
-            sem2.poison();
-        }
+        assert!(Arc::ptr_eq(sem1, sem2),
+            "Can't extend a guard with a guard from a different Semaphore");
+        self.amount += other.forget();
     }
 
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
