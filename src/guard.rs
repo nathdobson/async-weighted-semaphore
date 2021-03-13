@@ -56,7 +56,7 @@ impl<'a> SemaphoreGuard<'a> {
     pub fn extend(&mut self, other: SemaphoreGuard<'a>) {
         assert!(std::ptr::eq(self.semaphore, other.semaphore),
             "Can't extend a guard with a guard from a different Semaphore");
-        self.amount += other.forget();
+        self.amount = self.amount.saturating_add(other.forget());
     }
 
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
@@ -138,7 +138,7 @@ impl SemaphoreGuardArc {
         let sem2 = other.semaphore.as_ref().unwrap();
         assert!(Arc::ptr_eq(sem1, sem2),
             "Can't extend a guard with a guard from a different Semaphore");
-        self.amount += other.forget();
+        self.amount = self.amount.saturating_add(other.forget());
     }
 
     /// Drop the guard without calling [`Semaphore::release`]. This is useful when `release`s don't
