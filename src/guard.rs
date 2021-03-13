@@ -128,8 +128,8 @@ impl SemaphoreGuardArc {
     /// # use async_weighted_semaphore::Semaphore;
     /// # tokio_test::block_on(async {
     /// let semaphore = Semaphore::new(15);
-    /// let mut g1 = semaphore.acquire_arc(10).await.unwrap();
-    /// let g2 = semaphore.acquire_arc(5).await.unwrap();
+    /// let mut g1 = semaphore.acquire(10).await.unwrap();
+    /// let g2 = semaphore.acquire(5).await.unwrap();
     /// g1.extend(g2);
     /// # })
     /// ```
@@ -180,6 +180,7 @@ impl SemaphoreGuardArc {
     /// # Examples
     /// ```
     /// # use async_weighted_semaphore::Semaphore;
+    /// # use std::sync::Arc;
     /// # tokio_test::block_on(async {
     /// let semaphore = Arc::new(Semaphore::new(15));
     /// let mut g1 = semaphore.acquire_arc(15).await.unwrap();
