@@ -128,7 +128,7 @@
 //! wait for a lock is cancellation: if a [`AcquireFuture`] or [`AcquireFutureArc`] is dropped
 //! before [`Future::poll`] returns [`Poll::Ready`], the drop may synchronously wait for a lock.
 
-#![doc(html_root_url = "https://docs.rs/async-weighted-semaphore/0.1.1")]
+#![doc(html_root_url = "https://docs.rs/async-weighted-semaphore/0.2.1")]
 
 #[cfg(test)]
 #[macro_use]
